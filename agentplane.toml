@@ -1,0 +1,37 @@
+# agentplane.toml — this repository's own configuration (agentplane dogfoods itself).
+# Personal provider choices belong in ~/.config/agentplane/config.toml, not here.
+
+[project]
+name = "agentplane"
+policy = "PROJECT.md"
+
+[render]
+targets = ["claude", "codex", "cursor"]
+
+[models]
+# Aliases only; no provider-specific ids are required for the offline roles below.
+retired = []
+
+# Only offline roles are defined here so `agentplane doctor` is clean on any machine and in CI.
+# Add roles for your own provider CLIs in the user config layer, for example:
+#   [roles.impl]
+#   provider = "claude"
+#   model = "claude-sonnet-5"
+#   effort = "high"
+[roles.dry]
+provider = "mock"
+effort = "low"
+
+[roles.echo]
+provider = "echo-agent"
+effort = "low"
+timeout = 60
+
+[run]
+timeout = 900
+min_output_bytes = 40
+max_depth = 2
+env_extra = []
+
+[packs]
+paths = ["packs/example-pack"]

@@ -1,0 +1,11 @@
+# Local models through ollama. No network, no account: the offline/private fallback.
+name = "ollama"
+description = "Local model via `ollama run` (offline)"
+binary = "ollama"
+command = ["ollama", "run", "{model}"]
+efforts = []
+task_via = "stdin"
+# `ollama run` only answers; it cannot edit files. Runs are read-only by nature.
+read_only_only = true
+auth_markers = []
+quota_markers = []

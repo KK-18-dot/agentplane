@@ -1,0 +1,2 @@
+expect_exit = 0
+expect_status = "done"

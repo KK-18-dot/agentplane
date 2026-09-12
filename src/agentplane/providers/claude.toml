@@ -1,0 +1,16 @@
+# Claude Code CLI, headless. https://docs.anthropic.com/en/docs/claude-code
+name = "claude"
+description = "Claude Code CLI (claude -p)"
+binary = "claude"
+# {empty_mcp} is a package-provided empty MCP config: a delegated run never inherits the
+# caller's MCP servers. {permission_mode} is 'write_mode' or 'read_only_mode' below.
+command = ["claude", "-p", "--permission-mode", "{permission_mode}", "--strict-mcp-config", "--mcp-config", "{empty_mcp}"]
+model_args = ["--model", "{model}"]
+effort_args = ["--effort", "{effort}"]
+efforts = ["low", "medium", "high", "xhigh", "max"]
+write_mode = "acceptEdits"
+read_only_mode = "plan"
+task_via = "stdin"
+# Substrings that identify non-capability failures in the log tail (lower-cased match).
+quota_markers = ["you've hit your usage limit", "usage limit reached", "[resource_exhausted]"]
+auth_markers = ["authentication required", "login expired", "run /login", "not logged in"]

@@ -1,0 +1,42 @@
+# Built-in render targets: where the project policy (PROJECT.md) is rendered to.
+# Each target may declare:
+#   path        output path relative to the project root
+#   frontmatter text placed before the generated marker (Cursor rules need YAML frontmatter)
+#   appendix    default appendix file (relative to project root) appended after the policy
+# Packs and agentplane.toml can add targets or override these tables.
+
+[targets.claude]
+description = "Claude Code"
+path = "CLAUDE.md"
+appendix = ".agentplane/appendix/claude.md"
+
+[targets.codex]
+description = "OpenAI Codex and any AGENTS.md-aware agent"
+path = "AGENTS.md"
+appendix = ".agentplane/appendix/codex.md"
+
+[targets.cursor]
+description = "Cursor project rule"
+path = ".cursor/rules/project.mdc"
+frontmatter = "---\ndescription: Project contract (generated from PROJECT.md)\nalwaysApply: true\n---\n"
+appendix = ".agentplane/appendix/cursor.md"
+
+[targets.gemini]
+description = "Gemini CLI"
+path = "GEMINI.md"
+appendix = ".agentplane/appendix/gemini.md"
+
+[targets.copilot]
+description = "GitHub Copilot (instructions only)"
+path = ".github/copilot-instructions.md"
+appendix = ".agentplane/appendix/copilot.md"
+
+[targets.windsurf]
+description = "Windsurf"
+path = ".windsurfrules"
+appendix = ".agentplane/appendix/windsurf.md"
+
+[targets.cline]
+description = "Cline"
+path = ".clinerules"
+appendix = ".agentplane/appendix/cline.md"

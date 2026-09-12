@@ -1,0 +1,12 @@
+# Cursor CLI agent, headless. https://cursor.com/docs/cli
+name = "cursor"
+description = "Cursor CLI (cursor-agent -p)"
+binary = "cursor-agent"
+command = ["cursor-agent", "-p", "--trust", "--output-format", "text"]
+model_args = ["--model", "{model}"]
+# Cursor encodes effort in the model id suffix (e.g. gpt-5-high); no separate flag.
+efforts = []
+read_only_args = ["--mode", "plan"]
+task_via = "arg"
+quota_markers = ["usage limit", "rate limit"]
+auth_markers = ["not logged in", "authentication required", "login"]

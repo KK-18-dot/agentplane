@@ -1,0 +1,3 @@
+read_only = true
+expect_exit = 0
+expect_output_regex = "notes.txt"

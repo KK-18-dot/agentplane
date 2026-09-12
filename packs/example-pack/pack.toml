@@ -1,0 +1,23 @@
+# example-pack — a template for agentplane packs.
+# Contributes: one provider backed by a script shipped in the pack, one role using it,
+# and an appendix that is appended to the Claude Code target only.
+
+[pack]
+name = "example-pack"
+version = "0.1.0"
+description = "Template pack: script-backed provider, a role, and a per-target appendix"
+
+[providers.echo-agent]
+description = "Script that echoes the task and reports DONE (ships with the pack)"
+command = ["{pack_dir}/bin/echo-agent.sh", "{task}"]
+task_via = "arg"
+efforts = ["low", "high"]
+effort_args = ["--effort", "{effort}"]
+
+[roles.echo]
+provider = "echo-agent"
+effort = "low"
+timeout = 60
+
+[targets.claude]
+appendix = "appendix/claude.md"

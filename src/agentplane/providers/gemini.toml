@@ -1,0 +1,16 @@
+# Gemini CLI, headless. https://github.com/google-gemini/gemini-cli
+# Marked experimental: the flag set follows the CLI's documented options and has not been
+# exercised by the maintainers against every release. `agentplane doctor` only checks presence.
+name = "gemini"
+description = "Gemini CLI (gemini -p) [experimental]"
+experimental = true
+binary = "gemini"
+command = ["gemini", "-p", "{task}"]
+model_args = ["-m", "{model}"]
+# auto_edit approves file edits but still refuses arbitrary shell commands; agentplane never
+# passes the CLI's fully unattended mode.
+write_args = ["--approval-mode", "auto_edit"]
+efforts = []
+task_via = "arg"
+quota_markers = ["quota exceeded", "resource_exhausted", "rate limit"]
+auth_markers = ["not authenticated", "please log in", "api key"]

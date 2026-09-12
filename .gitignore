@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+# local secrets and environment files must never be committed
+.env
+.env.*
+!.env.example
+secrets/
+# eval results are local artifacts unless deliberately committed as baselines
+evals/results/

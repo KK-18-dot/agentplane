@@ -1,0 +1,36 @@
+# agentplane.toml — project configuration for agentplane.
+# Docs: docs/configuration.md. Personal provider choices belong in
+# ~/.config/agentplane/config.toml (same format), not in the repository.
+
+[project]
+name = "{{name}}"
+policy = "PROJECT.md"          # single source rendered into every target below
+
+[render]
+# Built-in targets: claude, codex, cursor, gemini, copilot, windsurf, cline.
+targets = ["claude", "codex", "cursor"]
+
+[models]
+# Aliases used by roles and by {{model:ALIAS}} tokens inside PROJECT.md.
+# Values are literal model ids for the provider that will run them.
+fast = "claude-sonnet-5"
+strong = "claude-opus-5"
+codex_default = "gpt-5.6-luna"
+local = "gemma4:e2b"
+{{models_extra}}# Model ids that must not reappear in [models] or in rendered files. `agentplane doctor` checks.
+retired = []
+
+# Roles are the unit of routing: `agentplane run --role NAME "task"`.
+# provider = a built-in or user-defined provider; model = alias from [models] or a literal id;
+# effort must be one the provider supports; read_only = never let the provider modify files;
+# fallback = role retried once when the provider reports quota exhaustion or a missing login.
+# `agentplane routes` shows what each role resolves to and whether its provider is installed.
+{{roles}}
+[run]
+timeout = 900            # default seconds when a role has no timeout
+min_output_bytes = 40    # exit 0 with less output than this is reported as exit 4 (empty output)
+max_depth = 2            # a delegated provider may delegate once more, never deeper
+env_extra = []           # extra environment variable names forwarded to providers (no secrets)
+
+[packs]
+paths = []               # directories containing pack.toml

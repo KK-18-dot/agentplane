@@ -1,0 +1,15 @@
+# OpenAI Codex CLI, headless. https://github.com/openai/codex
+name = "codex"
+description = "OpenAI Codex CLI (codex exec)"
+binary = "codex"
+command = ["codex", "exec", "--sandbox", "{permission_mode}"]
+model_args = ["-m", "{model}"]
+effort_args = ["-c", "model_reasoning_effort={effort}"]
+efforts = ["low", "medium", "high", "xhigh"]
+write_mode = "workspace-write"
+read_only_mode = "read-only"
+# Codex reads the prompt from stdin when the last argument is "-".
+task_via = "stdin"
+task_stdin_marker = "-"
+quota_markers = ["you've hit your usage limit", "usage limit reached", "rate limit"]
+auth_markers = ["authentication required", "login expired", "run `codex login`", "not logged in"]

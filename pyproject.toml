@@ -1,0 +1,50 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentplane"
+version = "0.1.0"
+description = "Define project policy once, render it into every agent harness, route work across providers, and get auditable results."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{ name = "agentplane contributors" }]
+keywords = ["ai-agents", "claude-code", "codex", "cursor", "agents-md", "routing", "evals"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Build Tools",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.5"]
+
+[project.scripts]
+agentplane = "agentplane.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/KK-18-dot/agentplane"
+Issues = "https://github.com/KK-18-dot/agentplane/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentplane"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
