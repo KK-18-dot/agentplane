@@ -12,7 +12,10 @@ targets = ["claude", "codex", "cursor"]
 
 [models]
 # Aliases used by roles and by {{model:ALIAS}} tokens inside PROJECT.md.
-# Values are literal model ids for the provider that will run them.
+# Values are literal model ids for the provider that will run them. The ids below are EXAMPLES:
+# which ids you can use depends on your plan with each provider (subscription CLI login or API
+# billing). Replace them with ids your plan enables, or override them in
+# ~/.config/agentplane/config.toml so the repository stays plan-neutral.
 fast = "claude-sonnet-5"
 strong = "claude-opus-5"
 codex_default = "gpt-5.6-luna"

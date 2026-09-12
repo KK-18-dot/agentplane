@@ -17,6 +17,17 @@ For each of model, effort, timeout, read-only:
 
 Efforts are validated against the provider's `efforts` list before anything runs. Cursor has none (effort lives in the model id suffix); Claude Code and Codex accept `low|medium|high|xhigh` (+`max` for Claude).
 
+## Matching routes to your plan
+
+agentplane does not call model APIs; it runs provider CLIs under whatever login or billing those CLIs already have. That makes the plan you are on a routing input:
+
+- **Subscription CLIs** (Claude Code, Codex, Cursor, Gemini CLI on a consumer or team plan): quota is per plan, so give each provider its own role and use `fallback` to move work when one plan is exhausted (status `quota-exhausted` triggers it).
+- **API-key billing**: configure the CLI for API use as its vendor documents; cost is per token, so prefer low effort and small models for `impl`-style roles and reserve strong models for `review`.
+- **Local only** (`ollama`): free and offline; mark roles `read_only = true` because `ollama run` cannot edit files.
+- **Mixed teams**: keep the shared `agentplane.toml` provider-neutral (roles named by purpose) and let each person map providers and model ids in their user config.
+
+Model ids in the `init` template are placeholders. Use the ids your plan enables; unknown ids fail at the CLI with status `failed`, never silently.
+
 ## Choosing routes
 
 A practical starting ladder, from cheap to expensive:

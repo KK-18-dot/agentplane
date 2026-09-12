@@ -1,0 +1,53 @@
+name: release
+
+# Builds the sdist and wheel for every published GitHub release and uploads them to PyPI
+# through trusted publishing (no API token stored in the repository).
+#
+# One-time setup by the repository owner, after which the `publish` job runs automatically:
+#   1. On PyPI: project "agentplane" → Publishing → add GitHub publisher
+#      (owner KK-18-dot, repository agentplane, workflow release.yml, environment pypi).
+#   2. On GitHub: Settings → Environments → create "pypi".
+#   3. On GitHub: Settings → Variables → Actions → PYPI_TRUSTED_PUBLISHER = true.
+# Until step 3 is done the publish job is skipped, so a release never fails on a missing publisher.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install build
+      - run: python -m build
+      - name: smoke-test the wheel in a clean environment
+        run: |
+          python -m venv /tmp/v
+          /tmp/v/bin/pip install -q dist/*.whl
+          /tmp/v/bin/agentplane --version
+          /tmp/v/bin/agentplane init --dir /tmp/p
+          /tmp/v/bin/agentplane render --dir /tmp/p
+          /tmp/v/bin/agentplane run --role dry --dir /tmp/p --quiet "release smoke"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    if: vars.PYPI_TRUSTED_PUBLISHER == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

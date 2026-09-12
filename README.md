@@ -19,11 +19,25 @@ Python 3.11+ and git. No other runtime dependencies.
 
 ```bash
 pipx install agentplane          # or: uv tool install agentplane
-# from a checkout:
+# from a checkout or a release wheel:
 pipx install .                   # or: uv tool install .
 ```
 
 Provider CLIs are optional. Install whichever you use (`claude`, `codex`, `cursor-agent`, `gemini`, `ollama`); agentplane detects them and works offline with a built-in mock provider when none is present.
+
+### Use it with whatever plan you have
+
+agentplane never talks to a model API itself. It launches the provider CLIs you already have, under the login and billing you already use, so pick the setup that matches your contract:
+
+| You have | Use | Notes |
+|---|---|---|
+| A subscription that includes a CLI (Claude Pro/Max → `claude`, ChatGPT Plus/Pro → `codex`, Cursor → `cursor-agent`, Google AI → `gemini`) | roles on that provider | the CLI's own login is used; no API key is needed or forwarded |
+| API keys instead of a subscription | the same CLIs configured for API billing, per each vendor's docs | keys stay in the CLI's own config; agentplane's environment allowlist does not forward them |
+| Several of the above | one role per provider, `fallback` between them | `routes` shows which provider each role bills |
+| No paid plan, or private data | `ollama` with a local model, `read_only` | offline, nothing leaves the machine |
+| Nothing yet | the `mock` provider (`--role dry`) | exercises the whole pipeline without a model |
+
+The model ids written by `agentplane init` are examples. Replace them with the ids your plan actually enables (each CLI can list its models), keep personal choices in `~/.config/agentplane/config.toml`, and check the resolved command with `agentplane run --role X --dry-run` before spending quota.
 
 ## Quickstart (5 minutes)
 

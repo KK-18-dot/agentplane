@@ -49,7 +49,7 @@ appendix = ".agentplane/appendix/mytool.md"
 
 ## `[models]`
 
-Aliases used by roles and by `{{model:ALIAS}}` tokens in `PROJECT.md`. Values are literal ids for the provider that runs them. `retired` lists ids that must never reappear (checked by `doctor`).
+Aliases used by roles and by `{{model:ALIAS}}` tokens in `PROJECT.md`. Values are literal ids for the provider that runs them; which ids work depends on your plan with that provider (subscription tier or API access), so treat the ids `init` writes as examples and put personal choices in the user config layer. `retired` lists ids that must never reappear (checked by `doctor`).
 
 ```toml
 [models]

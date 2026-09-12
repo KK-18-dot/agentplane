@@ -24,6 +24,12 @@ agentplane does four things: render policy, route roles, record results, grade e
 
 Built-in providers live in `src/agentplane/providers/*.toml`. When a CLI changes its flags, update the table, note the CLI version in the commit message, and add or adjust the argv test. Mark a provider `experimental = true` until someone has run the smoke suite against it end to end.
 
+## Releasing
+
+1. Bump `version` in `pyproject.toml` and `__version__` in `src/agentplane/__init__.py`; add a `CHANGELOG.md` entry.
+2. `git tag -a vX.Y.Z -m "vX.Y.Z" && git push --tags`, then create a GitHub release from the tag.
+3. `.github/workflows/release.yml` builds the sdist and wheel, smoke-tests the wheel in a clean environment, and publishes to PyPI through trusted publishing when the repository variable `PYPI_TRUSTED_PUBLISHER` is `true` (see the comment at the top of that workflow for the one-time PyPI setup). Until then the publish job is skipped and the built artifacts are attached to the workflow run.
+
 ## Commits and pull requests
 
 - `type: description` (feat / fix / docs / test / refactor / chore). The body says why, including alternatives you rejected.
