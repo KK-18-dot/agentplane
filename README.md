@@ -1,5 +1,7 @@
 # agentplane
 
+[![PyPI](https://img.shields.io/pypi/v/agentplane)](https://pypi.org/project/agentplane/) [![Python](https://img.shields.io/pypi/pyversions/agentplane)](https://pypi.org/project/agentplane/)
+
 **Define project policy once. Render it into every agent harness. Route work across providers. Get auditable results.**
 
 agentplane is a small, provider-neutral control plane for teams that use more than one AI coding agent (Claude Code, Codex, Cursor, Gemini CLI, local models, or anything with a headless CLI). It does four things and nothing else:
@@ -17,11 +19,20 @@ It is *not* a skill library, an agent framework, or a swarm runtime. It sits und
 
 Python 3.11+ and git. No other runtime dependencies.
 
+agentplane is published on [PyPI](https://pypi.org/project/agentplane/). Install the CLI into its own environment with pipx:
+
 ```bash
-pipx install agentplane          # or: uv tool install agentplane
-# from a checkout or a release wheel:
-pipx install .                   # or: uv tool install .
+pipx install agentplane
+agentplane --version
 ```
+
+If you do not use pipx, pip works too (inside a virtual environment):
+
+```bash
+python -m pip install agentplane
+```
+
+`uv tool install agentplane` is equivalent to the pipx command. Release artifacts on PyPI are uploaded from GitHub Actions through trusted publishing and carry provenance attestations. To work on agentplane itself, install from a checkout as described in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Provider CLIs are optional. Install whichever you use (`claude`, `codex`, `cursor-agent`, `gemini`, `ollama`); agentplane detects them and works offline with a built-in mock provider when none is present.
 

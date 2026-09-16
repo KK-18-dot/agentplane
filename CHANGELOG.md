@@ -2,7 +2,7 @@
 
 ## 0.1.0 — 2026-09-13
 
-First public release.
+First public release, available on PyPI (`pipx install agentplane`).
 
 - `init`, `render` (`--check`, `--adopt`, `--force`, appendices, `{{model:…}}` expansion), built-in targets for Claude Code, Codex/AGENTS.md, Cursor, Gemini CLI, Copilot, Windsurf, Cline.
 - `run` with role-based routing, explicit overrides, allowlisted environment, timeout, safety boundaries, typed self-report, failure classification, one-shot fallback, HANDOFF.md, JSONL ledger.

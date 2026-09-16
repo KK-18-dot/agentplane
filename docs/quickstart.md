@@ -3,9 +3,11 @@
 ## 1. Install
 
 ```bash
-pipx install agentplane        # or: uv tool install agentplane
+pipx install agentplane
 agentplane --version
 ```
+
+Without pipx: `python -m pip install agentplane` inside a virtual environment (or `uv tool install agentplane`).
 
 Requirements: Python 3.11+, git. Provider CLIs (`claude`, `codex`, `cursor-agent`, `gemini`, `ollama`) are optional; install the ones you use.
 

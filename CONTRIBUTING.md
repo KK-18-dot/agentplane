@@ -28,7 +28,8 @@ Built-in providers live in `src/agentplane/providers/*.toml`. When a CLI changes
 
 1. Bump `version` in `pyproject.toml` and `__version__` in `src/agentplane/__init__.py`; add a `CHANGELOG.md` entry.
 2. `git tag -a vX.Y.Z -m "vX.Y.Z" && git push --tags`, then create a GitHub release from the tag.
-3. `.github/workflows/release.yml` builds the sdist and wheel, smoke-tests the wheel in a clean environment, and publishes to PyPI through trusted publishing when the repository variable `PYPI_TRUSTED_PUBLISHER` is `true` (see the comment at the top of that workflow for the one-time PyPI setup). Until then the publish job is skipped and the built artifacts are attached to the workflow run.
+3. `.github/workflows/release.yml` builds the sdist and wheel, smoke-tests the wheel in a clean environment, and publishes both to PyPI through trusted publishing with provenance attestations. The trusted publisher and the `pypi` environment are already configured; the repository variable `PYPI_TRUSTED_PUBLISHER` (`true`) gates the publish job.
+4. Check the result: `pipx install --force agentplane==X.Y.Z && agentplane --version` (or the same with `python -m pip` in a fresh virtual environment).
 
 ## Commits and pull requests
 
