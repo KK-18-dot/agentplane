@@ -11,8 +11,19 @@
 - The forbidden-flag check matched exact strings only. It now also refuses `--dangerously-*=…`, `--force=…`, the short forms `-f` / `-y`, and the values `bypassPermissions`, `danger-full-access` and `yolo` as separate arguments or after `=` (covering `--permission-mode bypassPermissions`, `--sandbox=danger-full-access`, `-c sandbox_mode=danger-full-access`, `--approval-mode yolo`). Task text is no longer checked, so a task reading `--force` is not refused. `doctor` warns about such flags in any provider table.
 - The ledger no longer stores the full task for `task_via = "arg"` providers (cursor, gemini): `command` records `<task>` in its place, and `task_head` is masked like the HANDOFF. Ledger lines are appended with a single `os.write` on an `O_APPEND` descriptor.
 - State files were world-readable. The state directory, `logs/` and `evals/` are now created 0700, log files and `runs.jsonl` 0600, without touching the umask the provider inherits. `doctor` warns when an existing state directory or ledger is open to group/other and prints the `chmod` fix. Token shapes are masked in the log on disk after each run.
-
 - `eval report` now implements the documented rule: runs with status `quota-exhausted` or `auth-required` are excluded from pass rates and counted in a new `excluded (infrastructure)` column. `timeout` still counts as a failure, and `docs/evals.md` now says so.
+
+### Security
+
+Findings from a review of the changes above, fixed before release:
+
+- The git commands behind `changed` no longer run commands a provider planted in the repository (`core.fsmonitor`, filter drivers, the post-index-change hook), and they get the allowlisted environment instead of agentplane's own. A filter driver whose name cannot be overridden makes the snapshot refuse, with a note in `changed`.
+- File names in `changed` are quoted with git-style escapes when they contain control or format characters, quotes or backslashes, so a file name can no longer add sections to the HANDOFF. A trailing CR in a name is hashed correctly.
+- `changed` also lists newly set `skip-worktree` / `assume-unchanged` flags and changes to git's `config`, `info/exclude`, `info/attributes` and `hooks/*`.
+- A failing or slow snapshot (for example a huge file) no longer loses the run: files above 8 MiB are fingerprinted by size and mtime, FIFOs and devices are never read, and any snapshot error becomes a note in `changed`.
+- A signal that arrives while output is still being collected cancels the run (no fallback). Processes the provider left holding its output are killed with its process group when the run is over, and later output is dropped instead of reaching the log unmasked.
+- The forbidden-flag check also splits at every `=` (`--config=sandbox_mode=danger-full-access`), ignores surrounding whitespace, refuses any flag or config key containing `dangerously` (`--allow-dangerously-skip-permissions`), and refuses `bypassPermissions` / `danger-full-access` anywhere in an element.
+- The empty MCP config handed to Claude Code is re-checked before each run, model ids may no longer start with `-`, `doctor` warns when the state directory belongs to another user, `check.sh` failure reasons are masked, and `eval report --fail-on-regression` names the baseline cases it could not compare.
 
 ### Added
 

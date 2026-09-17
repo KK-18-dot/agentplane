@@ -3,6 +3,7 @@ import os
 import subprocess
 from pathlib import Path
 
+from agentplane import doctor as doctor_mod
 from agentplane.cli import main
 from agentplane.config import load_config, state_dir
 from agentplane.doctor import run_doctor
@@ -84,6 +85,14 @@ def test_doctor_warns_when_state_is_readable_by_others(project: Path) -> None:
     os.chmod(ledger, 0o600)
     text = run_doctor(project).render()
     assert "state directory" in text and "accessible by group/other" not in text
+
+
+def test_doctor_warns_when_state_belongs_to_another_user(project: Path, monkeypatch) -> None:
+    state_dir().mkdir(parents=True, mode=0o700)
+    real_uid = os.getuid()
+    monkeypatch.setattr(doctor_mod.os, "getuid", lambda: real_uid + 1)
+    text = run_doctor(project).render()
+    assert f"WARN state directory {state_dir()} is owned by uid {real_uid}" in text
 
 
 def test_doctor_reports_broken_config_as_warn(sandbox: Path) -> None:
@@ -219,6 +228,26 @@ def test_eval_report_fail_on_regression(sandbox: Path, capsys) -> None:
     assert main(["eval", "report", worse, "--baseline", base]) == 0
     assert main(["eval", "report", worse, "--fail-on-regression"]) == 2
     assert "--fail-on-regression needs --baseline" in capsys.readouterr().err
+    # cases that cannot be compared do not fail the gate, but they are named
+    assert main(["eval", "report", infra, "--baseline", base, "--fail-on-regression"]) == 0
+    err = capsys.readouterr().err
+    assert "not compared: gone (only in the baseline)" in err
+    all_infra = write("all-infra", [_row("a", False, "auth-required"), _row("b", False)])
+    assert main(["eval", "report", all_infra, "--baseline", base, "--fail-on-regression"]) == 0
+    assert "not compared: a (every run excluded as infrastructure)" in capsys.readouterr().err
+
+
+def test_check_script_output_is_masked_in_results(project: Path, sandbox: Path) -> None:
+    suite = sandbox / "leaky"
+    case = suite / "prints-token"
+    case.mkdir(parents=True)
+    (case / "task.md").write_text("anything\n", encoding="utf-8")
+    (case / "check.sh").write_text("echo 'failed with ghp_abcdefghijklmnop123'; exit 1\n", encoding="utf-8")
+    results_path, results = run_suite(
+        load_config(project), suite, role="dry", provider=None, trials=1, results_dir=sandbox / "leaky-out"
+    )
+    assert results[0].reasons == ["check.sh failed: failed with gh-REDACTED"]
+    assert "ghp_abcdefghijklmnop123" not in results_path.read_text()
 
 
 def test_eval_rows_carry_the_ledger_run_id(project: Path, sandbox: Path) -> None:

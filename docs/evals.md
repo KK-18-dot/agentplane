@@ -32,7 +32,7 @@ expect_output_regex = "..."   # searched in the provider log (DOTALL)
 expect_files = ["src/x.py"]   # must exist in the workdir after the run
 ```
 
-`check.sh` runs with the workdir as `$1` and cwd, and the environment `AGENTPLANE_LOG`, `AGENTPLANE_HANDOFF`, `AGENTPLANE_EXIT`, `AGENTPLANE_STATUS`. Use it for anything a regex cannot express: run the project's tests, assert only certain files changed, check the HANDOFF sections.
+`check.sh` runs with the workdir as `$1` and cwd, and the environment `AGENTPLANE_LOG`, `AGENTPLANE_HANDOFF`, `AGENTPLANE_EXIT`, `AGENTPLANE_STATUS`. Use it for anything a regex cannot express: run the project's tests, assert only certain files changed, check the HANDOFF sections. When it fails, the last line of its output becomes the failure reason in `results.jsonl` and `report.md`, with token shapes masked.
 
 ## Running
 
@@ -61,7 +61,7 @@ In CI, let the comparison decide:
 agentplane eval report results/new/results.jsonl --baseline results/base/results.jsonl --fail-on-regression
 ```
 
-`--fail-on-regression` prints the report as usual and exits 1 when any case present in both files has a lower pass rate than in the baseline (each regression is also printed on stderr). Cases that exist in only one file, or whose runs were all excluded, are not compared. It requires `--baseline` (exit 2 otherwise).
+`--fail-on-regression` prints the report as usual and exits 1 when any case present in both files has a lower pass rate than in the baseline (each regression is also printed on stderr). Cases that exist in only one file, or whose runs were all excluded on either side, are not compared and do not fail the gate; the ones missing from the new results or fully excluded are named on stderr as `not compared: …`, so a case that silently dropped out of a suite is still visible in the CI log. It requires `--baseline` (exit 2 otherwise).
 
 ## Design rules
 

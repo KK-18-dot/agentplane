@@ -62,7 +62,7 @@ If you raised the limit in the harness itself (for Codex, `project_doc_max_bytes
 
 ## `[models]`
 
-Aliases used by roles and by `{{model:ALIAS}}` tokens in `PROJECT.md`. Values are literal ids for the provider that runs them; which ids work depends on your plan with that provider (subscription tier or API access), so treat the ids `init` writes as examples and put personal choices in the user config layer. `retired` lists ids that must never reappear (checked by `doctor`).
+Aliases used by roles and by `{{model:ALIAS}}` tokens in `PROJECT.md`. Values are literal ids for the provider that runs them; which ids work depends on your plan with that provider (subscription tier or API access), so treat the ids `init` writes as examples and put personal choices in the user config layer. `retired` lists ids that must never reappear (checked by `doctor`). An id may use letters, digits and `. _ : / -` plus an optional `[1m]` suffix, and must not start with `-`, because it is passed as the value after a flag such as `--model`.
 
 ```toml
 [models]
@@ -118,8 +118,8 @@ With `task_via = "arg"`, `{task}` is substituted where it appears; if it appears
 
 agentplane refuses (exit 3) any provider argv element that switches off the harness's own approvals or sandbox:
 
-- a flag starting with `--dangerously-`, or the flags `--yolo`, `--force`, `-f`, `-y` (also written `--flag=value`);
-- the values `bypassPermissions`, `danger-full-access`, `yolo`, whether they are a separate element (`--permission-mode bypassPermissions`) or follow `=` (`--sandbox=danger-full-access`, `-c sandbox_mode=danger-full-access`). Quotes are stripped and case is ignored.
+- a flag name or config key containing `dangerously` (`--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `-c dangerously_bypass_approvals_and_sandbox=true`), or the flags `--yolo`, `--force`, `-f`, `-y` (also written `--flag=value`);
+- the values `bypassPermissions`, `danger-full-access`, `yolo`, as a separate element (`--permission-mode bypassPermissions`) or as any `=`-separated part (`--sandbox=danger-full-access`, `--config=sandbox_mode=danger-full-access`); `bypassPermissions` and `danger-full-access` are also refused anywhere inside an element, such as JSON passed to `--settings`. Quotes and surrounding whitespace are stripped and case is ignored.
 
 The check covers `command`, `model_args`, `effort_args`, `read_only_args`, `write_args`, `write_mode`, `read_only_mode` and `task_stdin_marker`, after placeholder expansion. The task text is not inspected. `agentplane doctor` applies the same check to every provider table (built-in, user, pack, project) and reports a WARN, so a bad definition shows up before anyone runs it. `-f` and `-y` are refused for every provider, because Cursor and Gemini CLI use them as short forms of `--force` and `--yolo`; if your own CLI uses them for something harmless, use its long option instead.
 

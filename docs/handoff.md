@@ -15,7 +15,9 @@ Every `agentplane run` ends the same way regardless of provider: an exit code, a
 | 130 | cancelled: agentplane received SIGINT while the provider ran |
 | 143 | cancelled: agentplane received SIGTERM or SIGHUP while the provider ran |
 
-Providers run in their own session, so Ctrl-C in a terminal reaches agentplane, not the provider. While a provider runs, agentplane traps SIGINT, SIGTERM and SIGHUP, stops the provider's process group the same way a timeout does, and then finishes normally: the HANDOFF and the ledger row are written with status `cancelled` before it exits 130 or 143. A signal the caller already ignores (for example under `nohup`) stays ignored, and a signal that arrives after the provider has exited on its own does not change the recorded result. A provider that exits 130 or 143 by itself is an ordinary `failed` run; only agentplane's own trap produces `cancelled`.
+Providers run in their own session, so Ctrl-C in a terminal reaches agentplane, not the provider. From the moment the provider is launched until the run's status is decided (output collected, `changed` measured), agentplane traps SIGINT, SIGTERM and SIGHUP. A trapped signal stops the provider's process group the same way a timeout does, and agentplane then finishes normally: the HANDOFF and the ledger row are written with status `cancelled` before it exits 130 or 143, and the fallback role is never tried. A signal the caller already ignores (for example under `nohup`) stays ignored. A provider that exits 130 or 143 by itself is an ordinary `failed` run; only agentplane's own trap produces `cancelled`.
+
+A run's process group does not outlive the run while it still holds the run's output. When the provider has exited but something it started keeps the output pipe open, agentplane waits up to 30 seconds (5 after a timeout or cancel) and then kills the whole group. Output that arrives after that point is dropped, never written to the log. A process that detached into its own session and closed the pipe is not tracked.
 
 ## Status vocabulary
 
@@ -73,7 +75,7 @@ Facts in `changed` and `verified` are measured by agentplane (a git snapshot bef
 
 ### What `changed` contains
 
-Before and after the run agentplane records `HEAD` and every entry of `git status --porcelain=v1 -z --untracked-files=all --no-renames`, with a content hash for each path that exists (`git hash-object --no-filters`; a symlink is recorded by its target). Paths are relative to the repository root. The list then has, in this order:
+Before and after the run agentplane records `HEAD` and every entry of `git status --porcelain=v1 -z --untracked-files=all --no-renames --ignore-submodules=dirty`, with a fingerprint for each path: the content hash for regular files up to 8 MiB (`git hash-object --no-filters`), size and modification time for larger files, the target for symlinks. It also records the index flags that hide tracked paths from `git status`, and fingerprints of git's own `config`, `config.worktree`, `info/exclude`, `info/attributes` and `hooks/*`. Paths are relative to the repository root. The list then has, in this order:
 
 | line | meaning |
 |---|---|
@@ -82,8 +84,14 @@ Before and after the run agentplane records `HEAD` and every entry of `git statu
 | `?? tests/test_orders.py` | a path that was clean before the run and is not now, with its porcelain status |
 | ` M src/app.py (modified before the run and again during it)` | a path that was already dirty and whose status or content changed during the run |
 | `(clean now; was modified before the run) notes.txt` | a path that was dirty before and is clean now (committed, reverted, or deleted) |
+| `(hidden from git status: skip-worktree set) src/app.py` | the run set `skip-worktree` or `assume-unchanged` on a tracked path, so later edits to it do not show in `git status` |
+| `(git metadata changed) .git/hooks/pre-commit` | the run changed one of git's own files listed above (a hook or config can make git run commands later) |
 
-Untracked directories are expanded, so a new file inside a directory that was already untracked is listed on its own. A dirty path the run did not touch is not listed. Above 5000 dirty paths the content hashes are skipped and a note line says so; further edits to paths that were already dirty are then invisible. Outside a git work tree the list is the single line `(not a git repository: changes could not be detected)`.
+Untracked directories are expanded, so a new file inside a directory that was already untracked is listed on its own. A dirty path the run did not touch is not listed. Above 5000 dirty paths the content hashes are skipped and a note line says so; further edits to paths that were already dirty are then invisible. Outside a git work tree the list is the single line `(not a git repository: changes could not be detected)`, and when the snapshot fails the single line starts with `(changes could not be detected:`; the run is recorded either way.
+
+A path that contains a control or format character, a double quote, a backslash, or bytes that are not UTF-8 is shown in double quotes with git-style escapes (`"evil\n## next"`), so a file name cannot add lines to the HANDOFF.
+
+The provider can write the repository's configuration, so the git commands behind the snapshot are run with the provider's allowlisted environment and with `core.fsmonitor`, hooks, the pager and index writes switched off, and with every configured filter driver (`filter.<name>.clean` / `.process`) overridden. A filter driver whose name contains `=` cannot be overridden on the command line; in that repository the snapshot is refused and `changed` says so. Because user-level drivers such as git-lfs are switched off too, an LFS file whose timestamp changed may be listed although its content did not.
 
 Run ids have the form `YYYYmmddHHMMSS-<provider>-<pid>-<6 hex>`. The random suffix keeps runs that one process starts within the same second apart, and the log file is created exclusively, so two runs never share a log.
 

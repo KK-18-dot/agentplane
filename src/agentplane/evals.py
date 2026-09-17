@@ -32,6 +32,7 @@ from typing import Any
 
 from .config import Config, ensure_state_dir
 from .errors import UsageError
+from .handoff import mask_secrets
 from .routing import resolve_route
 from .run import run_task
 
@@ -136,7 +137,8 @@ def _check(
         else:
             if res.returncode != 0:
                 detail = (res.stdout + res.stderr).strip().splitlines()
-                reasons.append("check.sh failed" + (f": {detail[-1]}" if detail else ""))
+                # The reason is stored in results.jsonl and report.md: mask token shapes like the log.
+                reasons.append("check.sh failed" + (f": {mask_secrets(detail[-1])}" if detail else ""))
     return reasons
 
 
@@ -257,6 +259,18 @@ def regressions(rows: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> l
                 f"{bpassed}/{bcounted} ({_pct(bpassed, bcounted)})"
             )
     return found
+
+
+def uncompared(rows: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> list[str]:
+    """Baseline cases the regression gate could not judge, so CI output can name them."""
+    rates, base_rates = _pass_rates(rows), _pass_rates(baseline)
+    notes = [f"{case} (only in the baseline)" for case in sorted(set(base_rates) - set(rates))]
+    for case in sorted(set(rates) & set(base_rates)):
+        if not rates[case][1]:
+            notes.append(f"{case} (every run excluded as infrastructure)")
+        elif not base_rates[case][1]:
+            notes.append(f"{case} (every baseline run excluded as infrastructure)")
+    return notes
 
 
 def render_report(results: list[CaseResult] | list[dict[str, Any]], baseline: list[dict[str, Any]] | None) -> str:

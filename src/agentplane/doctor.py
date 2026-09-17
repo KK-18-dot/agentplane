@@ -217,7 +217,13 @@ def _check_state(report: Report) -> None:
     # Directories created by agentplane 0.1.0 (or by hand) follow the umask; logs hold full
     # provider output, so an open state directory is a finding, with the one-line fix.
     fix = f"chmod -R go-rwx {shlex.quote(str(sd))}"
-    mode = sd.stat().st_mode & 0o777
+    info = sd.stat()
+    if info.st_uid != os.getuid():
+        report.warn(
+            f"state directory {sd} is owned by uid {info.st_uid}, not by you (uid {os.getuid()}); "
+            "point AGENTPLANE_STATE_DIR at a directory of your own"
+        )
+    mode = info.st_mode & 0o777
     if mode & 0o077:
         report.warn(
             f"state directory {sd} is accessible by group/other (mode {mode:o}); "

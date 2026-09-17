@@ -178,9 +178,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.json:
         _out(json.dumps(asdict(outcome.record)))
     else:
-        _out(
-            f"HANDOFF: {outcome.record.out} (exit={outcome.code}, status={outcome.status}, {outcome.record.seconds}s)"
-        )
+        _out(f"HANDOFF: {outcome.record.out} (exit={outcome.code}, status={outcome.status}, {outcome.record.seconds}s)")
     return outcome.code
 
 
@@ -333,7 +331,7 @@ def cmd_packs(args: argparse.Namespace) -> int:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
-    from .evals import load_results, regressions, render_report, run_suite
+    from .evals import load_results, regressions, render_report, run_suite, uncompared
 
     if args.eval_cmd == "run":
         cfg = load_config(args.dir)
@@ -359,6 +357,8 @@ def cmd_eval(args: argparse.Namespace) -> int:
             found = regressions(rows, baseline)
             for line in found:
                 _err(f"regression: {line}")
+            for line in uncompared(rows, baseline):
+                _err(f"not compared: {line}")
             return 1 if found else 0
         return 0
     raise UsageError("eval needs a subcommand: run | report")

@@ -39,6 +39,8 @@ def test_user_config_layer_is_below_project(project: Path, sandbox: Path) -> Non
         ('[roles.bad]\nprovider = "mock"\ntimeout = 0\n', "timeout must be an integer"),
         ('[roles.bad]\nprovider = "mock"\nfallback = "ghost"\n', "fallback 'ghost' is not a defined role"),
         ('[models]\nx = "bad model id!"\n', "invalid model id"),
+        ('[models]\nx = "--yolo"\n', "invalid model id"),
+        ('[models]\nx = "-c"\n', "invalid model id"),
         ('[render]\ntargets = ["nowhere"]\n', "unknown target"),
         ('[run]\nenv_extra = ["MY_API_KEY"]\n', "looks like a secret"),
         ('[providers.p]\ncommand = "not-a-list"\n', "must be a list of strings"),

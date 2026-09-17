@@ -27,7 +27,8 @@ from .errors import ConfigError
 PROJECT_CONFIG_NAME = "agentplane.toml"
 PACK_CONFIG_NAME = "pack.toml"
 
-MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:/-]+(\[1m\])?$")
+# No leading "-": a model id is passed as the value after --model and must not read as a flag.
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9._:/][A-Za-z0-9._:/-]*(\[1m\])?$")
 NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SECRET_LIKE_RE = re.compile(r"(KEY|TOKEN|SECRET|PASS|CRED|AUTH|COOKIE|SESSION|PRIVATE|BEARER|_PAT$|ACCESS)")
@@ -187,7 +188,10 @@ class Config:
         """A model may be written as a ``[models]`` key or as a literal model id."""
         resolved = self.models.get(value, value)
         if not MODEL_ID_RE.match(resolved):
-            raise ConfigError(f"invalid model id: {resolved!r} (letters, digits, . _ : / - and an optional [1m])")
+            raise ConfigError(
+                f"invalid model id: {resolved!r} (letters, digits, . _ : / and -, not starting with -, "
+                "and an optional [1m])"
+            )
         return resolved
 
     def env_allowlist(self) -> list[str]:

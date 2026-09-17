@@ -14,16 +14,18 @@ import hashlib
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import BinaryIO
 
-from .config import Config, ensure_state_dir
+from .config import DEFAULT_ENV_ALLOWLIST, Config, ensure_state_dir
 from .errors import (
     EXIT_CANCELLED_INT,
     EXIT_CANCELLED_TERM,
@@ -51,16 +53,21 @@ from .routing import Route, provider_status, resolve_route
 DEPTH_VAR = "AGENTPLANE_DEPTH"
 PARENT_VAR = "AGENTPLANE_PARENT"
 PARENT_RE = re.compile(r"^[A-Za-z0-9._:/@+-]{1,200}$")
-FORBIDDEN_PREFIX = "--dangerously-"
+# Claude Code's --dangerously-skip-permissions / --allow-dangerously-skip-permissions and Codex's
+# --dangerously-bypass-approvals-and-sandbox (also as a config key).
+FORBIDDEN_KEY_WORD = "dangerously"
 # -f / -y are the short forms of --force (Cursor) and --yolo (Gemini CLI).
 FORBIDDEN_FLAGS = {"--yolo", "--force", "-f", "-y"}
 # Values that select a harness's unattended mode, whether passed as the next argument
 # (--permission-mode bypassPermissions), after "=" (--sandbox=danger-full-access), or in a
 # config override (-c sandbox_mode=danger-full-access).
 FORBIDDEN_VALUES = {"bypasspermissions", "danger-full-access", "yolo"}
+FORBIDDEN_ANYWHERE = ("bypasspermissions", "danger-full-access")
 PROVIDER_ARG_KEYS = ("command", "model_args", "effort_args", "read_only_args", "write_args")
 PROVIDER_SCALAR_KEYS = ("write_mode", "read_only_mode", "task_stdin_marker")
 CANCEL_SIGNALS = ("SIGINT", "SIGTERM", "SIGHUP")
+OUTPUT_GRACE = 30  # seconds to collect output after the provider exited on its own
+STOP_GRACE = 5  # the same after a timeout or cancel, before the whole group is killed
 
 
 @dataclass
@@ -144,15 +151,20 @@ def parent_from_env(*, warn: bool = True) -> str | None:
 def is_forbidden_arg(arg: str) -> bool:
     """True when an argv element would switch off a harness's own approvals or sandbox.
 
-    Exact matching let ``--dangerously-skip-permissions=true`` or ``--approval-mode yolo``
-    through, so the flag name before ``=`` and any value (the element itself or the part after
-    ``=``, quotes stripped, case-insensitive) are checked as well.
+    Exact matching let ``--dangerously-skip-permissions=true``, ``--approval-mode yolo`` and
+    ``--config=sandbox_mode=danger-full-access`` through. The element is split at every ``=``:
+    a key part (the flag name or a config key) must not mention ``dangerously``, the flag name
+    must not be a bypass flag, and no part may be a bypass value. The two unambiguous bypass
+    values are also refused anywhere inside the element (JSON settings). Case, whitespace and
+    quotes are ignored.
     """
-    name, sep, value = arg.partition("=")
-    if name.startswith(FORBIDDEN_PREFIX) or name in FORBIDDEN_FLAGS:
+    parts = [part.strip().strip("'\"").strip() for part in arg.lower().split("=")]
+    keys = parts[:-1] if len(parts) > 1 else [parts[0]] if parts[0].startswith("-") else []
+    if any(FORBIDDEN_KEY_WORD in key for key in keys) or (parts[0].startswith("-") and parts[0] in FORBIDDEN_FLAGS):
         return True
-    candidates = (arg, value) if sep else (arg,)
-    return any(c.strip("'\" ").lower() in FORBIDDEN_VALUES for c in candidates)
+    if any(part in FORBIDDEN_VALUES for part in parts):
+        return True
+    return any(value in arg.lower() for value in FORBIDDEN_ANYWHERE)
 
 
 def forbidden_in_definition(spec: dict) -> list[tuple[str, str]]:
@@ -171,12 +183,27 @@ def forbidden_in_definition(spec: dict) -> list[tuple[str, str]]:
 
 
 def empty_mcp_path() -> Path:
+    """The empty MCP config handed to Claude Code. Its content is checked on every call, because
+    a file that lists servers would silently give a delegated run the tools it was meant to lack."""
+    template = resources.files("agentplane").joinpath("templates/empty-mcp.json").read_text(encoding="utf-8")
     path = ensure_state_dir() / "empty-mcp.json"
-    if not path.is_file():
-        path.write_text(
-            resources.files("agentplane").joinpath("templates/empty-mcp.json").read_text(), encoding="utf-8"
-        )
-    return path
+    for _ in range(3):
+        try:
+            current = None if path.is_symlink() else path.read_text(encoding="utf-8")
+        except OSError:
+            current = None
+        if current == template:
+            return path
+        path.unlink(missing_ok=True)
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except FileExistsError:  # a concurrent run is writing it; read it again
+            time.sleep(0.05)
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(template)
+        return path
+    raise AgentplaneError(f"cannot prepare the empty MCP config at {path}")
 
 
 def build_command(cfg: Config, route: Route, task: str, target: Path) -> tuple[list[str], str | None]:
@@ -250,7 +277,24 @@ def build_env(cfg: Config, route: Route, depth: int, run_id: str) -> dict[str, s
 NOT_GIT_NOTE = "(not a git repository: changes could not be detected)"
 AGAIN_SUFFIX = " (modified before the run and again during it)"
 CLEAN_NOW_PREFIX = "(clean now; was modified before the run) "
+METADATA_PREFIX = "(git metadata changed) "
 HASH_LIMIT = 5000
+HASH_MAX_BYTES = 8 * 1024 * 1024  # larger files are fingerprinted by size and mtime, not read
+# The provider can write the repository's own config (.git is inside or above --dir). Nothing
+# git runs for the snapshot may execute a command planted there: no fsmonitor, no hooks (an
+# index refresh fires post-index-change), no pager, no index writes, and every filter driver is
+# switched off per call. git also gets the provider's allowlisted environment, not ours.
+SAFE_GIT_ARGS = ("--no-pager", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null")
+FILTER_KEY_RE = re.compile(r"filter\.(.+)\.(?:clean|process)", re.S)
+# Git files a provider could change to hide work from `git status` or to plant commands.
+GIT_META_COMMON = ("config", "info/exclude", "info/attributes")
+GIT_META_WORKTREE = ("config.worktree",)
+_C_ESCAPES = {"\a": "\\a", "\b": "\\b", "\t": "\\t", "\n": "\\n", "\v": "\\v", "\f": "\\f", "\r": "\\r"}
+_C_ESCAPES.update({'"': '\\"', "\\": "\\\\"})
+
+
+class UnsafeRepository(Exception):
+    """The repository's configuration cannot be neutralised for a snapshot."""
 
 
 @dataclass
@@ -259,7 +303,9 @@ class GitSnapshot:
 
     Comparing ``git status`` lines alone misses a second edit to a file that was already dirty,
     new files inside a directory that was already untracked, and commits made by the provider,
-    so the snapshot keeps the commit and a per-path content fingerprint instead.
+    so the snapshot keeps the commit and a per-path content fingerprint instead. It also keeps
+    what ``git status`` cannot show: index flags that hide tracked paths, and git's own config,
+    exclude, attributes and hook files.
     """
 
     root: Path
@@ -267,52 +313,117 @@ class GitSnapshot:
     entries: dict[str, tuple[str, str]] = field(default_factory=dict)  # path -> (XY, fingerprint)
     hashed: bool = True
     error: str | None = None
+    hidden: dict[str, tuple[str, ...]] = field(default_factory=dict)  # path -> index flags
+    meta: dict[str, str] = field(default_factory=dict)  # displayed git file -> fingerprint
 
 
-def _git(root: Path, *args: str, stdin: bytes | None = None, timeout: int = 60) -> subprocess.CompletedProcess[bytes]:
+def _git_env() -> dict[str, str]:
+    env = {name: os.environ[name] for name in DEFAULT_ENV_ALLOWLIST if name in os.environ}
+    env["GIT_OPTIONAL_LOCKS"] = "0"  # status must not rewrite the index
+    return env
+
+
+def _git(
+    root: Path, *args: str, stdin: bytes | None = None, timeout: int = 60, config: tuple[str, ...] = ()
+) -> subprocess.CompletedProcess[bytes]:
     return subprocess.run(
-        ["git", "-C", str(root), *args],
+        ["git", *SAFE_GIT_ARGS, *config, "-C", str(root), *args],
         input=stdin,
         stdin=None if stdin is not None else subprocess.DEVNULL,
         capture_output=True,
         timeout=timeout,
+        env=_git_env(),
     )
 
 
+def _needs_quote(ch: str) -> bool:
+    category = unicodedata.category(ch)
+    return ch in _C_ESCAPES or category[0] == "C" or category in ("Zl", "Zp")
+
+
 def _display(path: str) -> str:
-    """Paths are kept as os.fsdecode() strings; show undecodable bytes as escapes."""
-    return path.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+    """Quote a path the way git does when it could break a line-oriented reader.
+
+    ``changed`` lands in HANDOFF.md, so a provider-chosen file name must not be able to start
+    a new line or reorder text. Control and format characters, quotes, backslashes and bytes
+    that are not UTF-8 are escaped (octal, as git does) and the path is put in double quotes;
+    other non-ASCII text stays readable.
+    """
+    if not any(_needs_quote(ch) for ch in path):
+        return path
+    out = []
+    for ch in path:
+        if ch in _C_ESCAPES:
+            out.append(_C_ESCAPES[ch])
+        elif _needs_quote(ch):
+            out.append("".join(f"\\{byte:03o}" for byte in ch.encode("utf-8", "surrogateescape")))
+        else:
+            out.append(ch)
+    return '"' + "".join(out) + '"'
 
 
 def _blob_hash(path: Path) -> str:
-    """Same value as ``git hash-object --no-filters`` in a SHA-1 repository."""
+    """Same value as ``git hash-object --no-filters`` in a SHA-1 repository.
+
+    Opened without following a final symlink and without blocking (a FIFO must not hang the
+    snapshot), and read only when it is a regular file.
+    """
     try:
-        digest = hashlib.sha1(f"blob {path.stat().st_size}\0".encode(), usedforsecurity=False)
-        with path.open("rb") as fh:
-            for chunk in iter(lambda: fh.read(1 << 20), b""):
-                digest.update(chunk)
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError:
         return "missing"
+    with os.fdopen(fd, "rb") as fh:
+        info = os.fstat(fh.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            return "special"
+        digest = hashlib.sha1(f"blob {info.st_size}\0".encode(), usedforsecurity=False)
+        try:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+        except OSError:
+            return "missing"
     return digest.hexdigest()
+
+
+def _path_print(path: Path) -> tuple[str, bool]:
+    """(fingerprint, worth hashing) from lstat alone. Only regular files up to HASH_MAX_BYTES
+    are read; the decision depends on the file itself, so both snapshots decide the same way."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return "missing", False
+    if stat.S_ISLNK(info.st_mode):
+        return "link:" + os.readlink(path), False
+    if stat.S_ISDIR(info.st_mode):
+        return "dir", False  # an untracked nested repository or a submodule
+    if not stat.S_ISREG(info.st_mode):
+        return "special", False
+    if info.st_size > HASH_MAX_BYTES:
+        return f"stat:{info.st_size}:{info.st_mtime_ns}", False
+    return "", True
 
 
 def _fingerprints(root: Path, paths: list[str]) -> dict[str, str]:
     prints: dict[str, str] = {}
     batch: list[str] = []
+    real_root = os.path.realpath(root)
+    inside: dict[Path, bool] = {}
     for rel in paths:
         full = root / rel
-        if full.is_symlink():
-            prints[rel] = "link:" + os.readlink(full)
-        elif full.is_file():
-            # --stdin-paths reads one path per line and C-unquotes a leading '"'.
-            if "\n" in rel or rel.startswith('"'):
-                prints[rel] = _blob_hash(full)
-            else:
-                batch.append(rel)
-        elif full.is_dir():
-            prints[rel] = "dir"  # an untracked nested repository or a submodule
+        if full.parent not in inside:
+            real_parent = os.path.realpath(full.parent)
+            inside[full.parent] = real_parent == real_root or real_parent.startswith(real_root + os.sep)
+        if not inside[full.parent]:  # a parent directory was swapped for a symlink
+            prints[rel] = "outside"
+            continue
+        prints[rel], wanted = _path_print(full)
+        if not wanted:
+            continue
+        # --stdin-paths reads one path per line, drops a trailing CR and C-unquotes a leading '"'.
+        if "\n" in rel or "\r" in rel or rel.startswith('"'):
+            prints[rel] = _blob_hash(full)
         else:
-            prints[rel] = "missing"
+            batch.append(rel)
     if batch:
         stdin = b"".join(os.fsencode(rel) + b"\n" for rel in batch)
         res = _git(root, "hash-object", "--no-filters", "--stdin-paths", stdin=stdin, timeout=300)
@@ -324,21 +435,92 @@ def _fingerprints(root: Path, paths: list[str]) -> dict[str, str]:
     return prints
 
 
+def _filter_overrides(root: Path) -> tuple[str, ...]:
+    """``-c filter.<name>.clean=`` pairs that switch off every configured filter driver.
+
+    ``git status`` runs a driver's clean command to compare file content, so a provider that can
+    write .git/config could otherwise make agentplane run any command outside the provider's
+    sandbox. User-level drivers (git-lfs) are switched off too; that can only add false
+    positives to ``changed``, never run anything.
+    """
+    res = _git(root, "config", "-z", "--get-regexp", r"^filter\..*\.(clean|process)$")
+    overrides: list[str] = []
+    for item in res.stdout.split(b"\0"):
+        key = os.fsdecode(item.split(b"\n", 1)[0])
+        match = FILTER_KEY_RE.fullmatch(key)
+        if not match:
+            continue
+        if "=" in key:  # `-c key=value` splits at the first "=", so this driver cannot be overridden
+            raise UnsafeRepository(
+                f"git config defines a filter driver whose name contains '=' ({_display(match.group(1))}); "
+                "agentplane will not run git status there"
+            )
+        overrides += ["-c", f"{key}="]
+    return tuple(overrides)
+
+
+def _hidden_paths(root: Path) -> dict[str, tuple[str, ...]]:
+    """Tracked paths that ``git status`` will not report because of an index flag."""
+    res = _git(root, "ls-files", "-v", "-z")
+    hidden: dict[str, tuple[str, ...]] = {}
+    for token in res.stdout.split(b"\0"):
+        if len(token) < 3:
+            continue
+        tag = chr(token[0])
+        flags = (("assume-unchanged",) if tag.islower() else ()) + (("skip-worktree",) if tag in "Ss" else ())
+        if flags:
+            hidden[os.fsdecode(token[2:])] = flags
+    return hidden
+
+
+def _git_metadata(root: Path, git_dir: Path, common_dir: Path) -> dict[str, str]:
+    paths = [common_dir / name for name in GIT_META_COMMON] + [git_dir / name for name in GIT_META_WORKTREE]
+    hooks = common_dir / "hooks"
+    if hooks.is_dir() and not hooks.is_symlink():
+        paths += sorted(hooks.iterdir())
+    prints: dict[str, str] = {}
+    real_root = os.path.realpath(root)
+    for path in paths:
+        real = os.path.realpath(path.parent) + os.sep + path.name
+        label = os.path.relpath(real, real_root) if real.startswith(real_root + os.sep) else real
+        fingerprint, wanted = _path_print(path)
+        prints[_display(label)] = _blob_hash(path) if wanted else fingerprint
+    return prints
+
+
 def git_state(target: Path) -> GitSnapshot | None:
-    """Snapshot the repository around ``target``; None when it is not inside a work tree."""
+    """Snapshot the repository around ``target``; None when it is not inside a work tree.
+
+    Any failure after that point becomes a snapshot with ``error`` set, so the run is still
+    recorded (with a note in ``changed``) instead of being lost.
+    """
     try:
-        probe = _git(target, "rev-parse", "--is-inside-work-tree", "--show-toplevel", timeout=30)
+        probe = _git(
+            target, "rev-parse", "--is-inside-work-tree", "--show-toplevel", "--absolute-git-dir",
+            "--git-common-dir", timeout=30,
+        )  # fmt: skip
     except (OSError, subprocess.TimeoutExpired):
         return None
     lines = probe.stdout.decode("utf-8", "surrogateescape").splitlines()
-    if probe.returncode != 0 or not lines or lines[0] != "true" or len(lines) < 2:
+    if probe.returncode != 0 or len(lines) < 4 or lines[0] != "true":
         return None
     root = Path(lines[1])
     try:
-        head_res = _git(root, "rev-parse", "--verify", "-q", "HEAD")
-        status = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return GitSnapshot(root, None, error=f"git status failed: {exc}")
+        return _snapshot(root, Path(lines[2]), target / lines[3])  # common dir is relative to target
+    except UnsafeRepository as exc:
+        return GitSnapshot(root, None, error=str(exc))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return GitSnapshot(root, None, error=f"git snapshot failed: {exc}")
+
+
+def _snapshot(root: Path, git_dir: Path, common_dir: Path) -> GitSnapshot:
+    config = _filter_overrides(root)
+    head_res = _git(root, "rev-parse", "--verify", "-q", "HEAD")
+    # --ignore-submodules=dirty: never run git inside a submodule, whose config is not covered above.
+    status = _git(
+        root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
+        "--ignore-submodules=dirty", config=config,
+    )  # fmt: skip
     if status.returncode != 0:
         detail = status.stderr.decode("utf-8", "replace").strip().splitlines()
         return GitSnapshot(root, None, error="git status failed" + (f": {detail[-1]}" if detail else ""))
@@ -353,10 +535,11 @@ def git_state(target: Path) -> GitSnapshot | None:
         states[os.fsdecode(token[3:])] = xy
         if "R" in xy or "C" in xy:  # not produced with --no-renames; skip the source path anyway
             next(tokens, None)
+    extra = {"hidden": _hidden_paths(root), "meta": _git_metadata(root, git_dir, common_dir)}
     if len(states) > HASH_LIMIT:
-        return GitSnapshot(root, head, {p: (xy, "") for p, xy in states.items()}, hashed=False)
+        return GitSnapshot(root, head, {p: (xy, "") for p, xy in states.items()}, hashed=False, **extra)
     prints = _fingerprints(root, list(states))
-    return GitSnapshot(root, head, {p: (xy, prints[p]) for p, xy in states.items()})
+    return GitSnapshot(root, head, {p: (xy, prints[p]) for p, xy in states.items()}, **extra)
 
 
 def _commit_lines(root: Path, old: str | None, new: str | None) -> list[str]:
@@ -404,6 +587,13 @@ def diff_git_state(before: GitSnapshot | None, after: GitSnapshot | None) -> lis
             lines.append(f"{xy} {_display(path)}{AGAIN_SUFFIX}")
     for path in sorted(set(before.entries) - set(after.entries)):
         lines.append(f"{CLEAN_NOW_PREFIX}{_display(path)}")
+    for path in sorted(after.hidden):
+        for flag in after.hidden[path]:
+            if flag not in before.hidden.get(path, ()):
+                lines.append(f"(hidden from git status: {flag} set) {_display(path)}")
+    for label in sorted(set(before.meta) | set(after.meta)):
+        if before.meta.get(label, "missing") != after.meta.get(label, "missing"):
+            lines.append(f"{METADATA_PREFIX}{label}")
     return lines
 
 
@@ -425,7 +615,7 @@ def _create_log(provider: str) -> tuple[str, Path, int]:
     raise AgentplaneError(f"could not allocate a unique run id in {log_dir}")
 
 
-def _run_mock(cfg: Config, route: Route, task: str, target: Path, log: BinaryIO, echo: bool) -> int:
+def _run_mock(cfg: Config, route: Route, task: str, target: Path, log: BinaryIO, echo: bool, trap: CancelTrap) -> int:
     spec = cfg.providers[route.provider]
     response = os.environ.get("AGENTPLANE_MOCK_RESPONSE")
     if response is None:
@@ -438,12 +628,12 @@ def _run_mock(cfg: Config, route: Route, task: str, target: Path, log: BinaryIO,
     code_raw = os.environ.get("AGENTPLANE_MOCK_EXIT", str(spec.get("exit_code", 0)))
     code = int(code_raw) if str(code_raw).lstrip("-").isdigit() else 0
     sleep = float(os.environ.get("AGENTPLANE_MOCK_SLEEP", "0") or 0)
+    if not trap.sleep(min(sleep, route.timeout)):
+        log.write(b"[mock] cancelled\n")
+        return trap.exit_code
     if sleep > route.timeout:
-        time.sleep(route.timeout)
         log.write(b"[mock] still running\n")
         return EXIT_TIMEOUT
-    if sleep:
-        time.sleep(sleep)
     if not route.read_only:
         for rel, content in (spec.get("writes") or {}).items():
             path = target / rel
@@ -459,19 +649,20 @@ def _run_mock(cfg: Config, route: Route, task: str, target: Path, log: BinaryIO,
 
 
 class CancelTrap:
-    """Turn SIGINT / SIGTERM / SIGHUP into a recorded cancellation while a provider runs.
+    """Turn SIGINT / SIGTERM / SIGHUP into a recorded cancellation while a run is in progress.
 
     Providers start in their own session so a terminal's Ctrl-C never reaches them directly.
     Without this trap agentplane itself died on the signal and left the provider running, with
-    no HANDOFF and no ledger row. The handler only records the signal; the wait loop in
-    ``_run_cli`` stops the provider's process group and the run is recorded as ``cancelled``.
-    Signals the caller already ignores (``nohup``, background jobs) stay ignored, and handlers
-    can only be installed from the main thread, so the trap is inert elsewhere.
+    no HANDOFF and no ledger row. The handler only records the signal (raising inside
+    Popen.wait could lose the child's status); the wait loop in ``_run_cli`` stops the
+    provider's process group, and any signal received before the run's status is decided makes
+    the run ``cancelled``, which also rules out the fallback. Signals the caller already ignores
+    (``nohup``, background jobs) stay ignored, and handlers can only be installed from the main
+    thread, so the trap is inert elsewhere.
     """
 
     def __init__(self) -> None:
         self.received: int | None = None  # first signal seen while armed
-        self.cancelled: int | None = None  # the signal that actually stopped the provider
         self._previous: dict[int, object] = {}
 
     def __enter__(self) -> CancelTrap:
@@ -493,7 +684,23 @@ class CancelTrap:
 
     @property
     def exit_code(self) -> int:
-        return EXIT_CANCELLED_INT if self.cancelled == signal.SIGINT else EXIT_CANCELLED_TERM
+        return EXIT_CANCELLED_INT if self.received == signal.SIGINT else EXIT_CANCELLED_TERM
+
+    def sleep(self, seconds: float) -> bool:
+        """Sleep in short steps; False as soon as a cancel signal has arrived."""
+        end = time.monotonic() + seconds
+        while (left := end - time.monotonic()) > 0:
+            if self.received is not None:
+                return False
+            time.sleep(min(left, 0.1))
+        return self.received is None
+
+
+def _kill_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def _run_cli(
@@ -519,11 +726,19 @@ def _run_cli(
     except OSError as exc:
         raise AgentplaneError(f"cannot start provider: {exc}") from exc
 
+    # Once the run is over the log is masked and rewritten; output that arrives later is drained
+    # (so a straggler never blocks on a full pipe) but never written.
+    log_lock = threading.Lock()
+    log_closed = threading.Event()
+
     def pump() -> None:
         assert proc.stdout is not None
         for chunk in iter(lambda: proc.stdout.read(4096), b""):
-            log.write(chunk)
-            log.flush()
+            with log_lock:
+                if log_closed.is_set():
+                    continue
+                log.write(chunk)
+                log.flush()
             if echo:
                 sys.stdout.buffer.write(chunk)
                 sys.stdout.buffer.flush()
@@ -546,7 +761,6 @@ def _run_cli(
     deadline = time.monotonic() + timeout
     while True:
         if trap.received is not None:
-            trap.cancelled = trap.received
             _terminate(proc)
             break
         remaining = deadline - time.monotonic()
@@ -559,8 +773,20 @@ def _run_cli(
             break
         except subprocess.TimeoutExpired:
             continue
-    reader.join(timeout=30)
-    if trap.cancelled is not None:
+    stopping = timed_out or trap.received is not None
+    grace_end = time.monotonic() + (STOP_GRACE if stopping else OUTPUT_GRACE)
+    while reader.is_alive() and time.monotonic() < grace_end and (stopping or trap.received is None):
+        reader.join(timeout=0.2)
+    if reader.is_alive():
+        # Something the provider started still holds its output pipe after the provider ended (or
+        # a cancel arrived meanwhile). The run is over: kill the whole process group. The kernel
+        # does not reuse a group id while a member is alive; a holder that left the group with
+        # setsid is out of reach, and whatever it still prints is dropped below.
+        _kill_group(proc.pid)
+        reader.join(timeout=STOP_GRACE)
+    with log_lock:
+        log_closed.set()
+    if trap.received is not None:
         return trap.exit_code
     return EXIT_TIMEOUT if timed_out else proc.returncode
 
@@ -615,14 +841,13 @@ def run_task(
 
     before = git_state(target)
     start = time.monotonic()
-    trap = CancelTrap()
-    with os.fdopen(log_fd, "w+b") as log:
+    # Armed from launch until the status is decided: a signal in that window cancels the run.
+    with CancelTrap() as trap, os.fdopen(log_fd, "w+b") as log:
         if spec.get("kind", "cli") == "mock":
-            code = _run_mock(cfg, route, task, target, log, echo)
+            code = _run_mock(cfg, route, task, target, log, echo, trap)
         else:
             env = build_env(cfg, route, depth, run_id)
-            with trap:
-                code = _run_cli(argv, stdin_text, env, target, route.timeout, log, echo, trap)
+            code = _run_cli(argv, stdin_text, env, target, route.timeout, log, echo, trap)
         seconds = int(time.monotonic() - start)
         log.flush()
         log.seek(0)
@@ -634,28 +859,29 @@ def run_task(
             log.truncate()
             log.write(masked)
         log_text = masked.decode("utf-8", errors="replace")
-    if trap.cancelled is not None:
-        # A provider's own exit status 130/143 is an ordinary failure; only agentplane's trap
-        # makes a run "cancelled", and a cancelled run is never classified or retried.
-        exit_code, kind = trap.exit_code, None
-        print(f"agentplane: cancelled by {signal.Signals(trap.cancelled).name}; provider stopped", file=sys.stderr)
-    else:
-        if code == 0 and len(masked) < int(cfg.run.get("min_output_bytes", 200)):
-            print(
-                f"agentplane: warning: exit 0 but output is shorter than min_output_bytes: {log_path}",
-                file=sys.stderr,
+        log.close()
+        changed = diff_git_state(before, git_state(target))
+        cancelled = trap.received
+        if cancelled is not None:
+            # A provider's own exit status 130/143 is an ordinary failure; only agentplane's trap
+            # makes a run "cancelled", and a cancelled run is never classified or retried.
+            exit_code, kind = trap.exit_code, None
+            print(f"agentplane: cancelled by {signal.Signals(cancelled).name}; provider stopped", file=sys.stderr)
+        else:
+            if code == 0 and len(masked) < int(cfg.run.get("min_output_bytes", 200)):
+                print(
+                    f"agentplane: warning: exit 0 but output is shorter than min_output_bytes: {log_path}",
+                    file=sys.stderr,
+                )
+                code = EXIT_EMPTY
+            exit_code = code if code in (0, EXIT_EMPTY, EXIT_TIMEOUT) else 1
+            kind = (
+                failure_kind(log_text, spec.get("quota_markers", []) or [], spec.get("auth_markers", []) or [])
+                if exit_code == 1
+                else None
             )
-            code = EXIT_EMPTY
-        exit_code = code if code in (0, EXIT_EMPTY, EXIT_TIMEOUT) else 1
-        kind = (
-            failure_kind(log_text, spec.get("quota_markers", []) or [], spec.get("auth_markers", []) or [])
-            if exit_code == 1
-            else None
-        )
     reported = self_report(log_text)
     status_name, next_note = status_for(exit_code, reported, kind)
-
-    changed = diff_git_state(before, git_state(target))
 
     record = RunRecord(
         id=run_id,
