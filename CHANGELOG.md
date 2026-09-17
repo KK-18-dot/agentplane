@@ -6,6 +6,9 @@
 
 - `changed` no longer misses real changes. The before/after snapshot now records `HEAD` and a content hash per dirty path (untracked directories expanded), so a second edit to a file that was already modified, a new file inside an already-untracked directory, and commits made by the provider (`commits: a..b (N)` plus `committed <S> <path>` lines) all show up. Paths that were dirty before and are clean now are listed too. Entries stay plain strings in the ledger.
 - Run ids carry a random suffix and log files are created exclusively (`O_EXCL`), so eval trials started by one process within the same second no longer share, and overwrite, one log.
+- A fallback no longer runs a `read_only = true` fallback role writable when the original route was writable. Fallback can only tighten read-only.
+- Cancelling agentplane no longer leaves the provider running. SIGINT / SIGTERM / SIGHUP stop the provider's process group, and the run is still recorded (HANDOFF + ledger) with the new status `cancelled` and exit code 130 (SIGINT) or 143 (SIGTERM, SIGHUP). Cancelled runs never trigger the fallback. The task is now fed to the provider's stdin from a thread, so a provider that does not read a large task can no longer block the timeout.
+- The forbidden-flag check matched exact strings only. It now also refuses `--dangerously-*=…`, `--force=…`, the short forms `-f` / `-y`, and the values `bypassPermissions`, `danger-full-access` and `yolo` as separate arguments or after `=` (covering `--permission-mode bypassPermissions`, `--sandbox=danger-full-access`, `-c sandbox_mode=danger-full-access`, `--approval-mode yolo`). Task text is no longer checked, so a task reading `--force` is not refused. `doctor` warns about such flags in any provider table.
 
 ## 0.1.0 — 2026-09-13
 

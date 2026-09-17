@@ -99,7 +99,7 @@ agentplane.toml ── roles ──▶ run --role X ──▶ provider CLI (env 
 - **Policy layer**: `PROJECT.md` (+ optional per-target appendices in `.agentplane/appendix/`). Model aliases `{{model:NAME}}` expand from `[models]`.
 - **Routing layer**: `[roles.*]` in `agentplane.toml`; personal provider choices go in `~/.config/agentplane/config.toml` and never into the repo.
 - **Execution layer**: `run` launches the provider headless with an allowlisted environment, a timeout, and the provider's own sandbox flags; it never passes flags that disable a harness's approvals.
-- **Result contract**: exit code `0 done · 1 failed · 2 usage · 3 safety boundary · 4 empty output · 124 timeout`, plus the provider's typed self-report (`DONE`, `DONE_WITH_CONCERNS`, `BLOCKED`, `NEEDS_CONTEXT`) read only from its last line.
+- **Result contract**: exit code `0 done · 1 failed · 2 usage · 3 safety boundary · 4 empty output · 124 timeout · 130/143 cancelled`, plus the provider's typed self-report (`DONE`, `DONE_WITH_CONCERNS`, `BLOCKED`, `NEEDS_CONTEXT`) read only from its last line.
 - **Extension**: packs (`pack.toml`) add providers, targets, roles, and appendices. See `packs/`.
 
 Full docs: [docs/quickstart.md](docs/quickstart.md) · [docs/configuration.md](docs/configuration.md) · [docs/routing.md](docs/routing.md) · [docs/handoff.md](docs/handoff.md) · [docs/evals.md](docs/evals.md) · [docs/packs.md](docs/packs.md) · [docs/architecture.md](docs/architecture.md) · [docs/security.md](docs/security.md)

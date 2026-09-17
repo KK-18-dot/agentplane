@@ -68,7 +68,7 @@ What happens:
 2. The task is prefixed with a short preamble asking for a final `AGENTPLANE-STATUS: DONE | DONE_WITH_CONCERNS | BLOCKED | NEEDS_CONTEXT` line.
 3. agentplane measures the result (git diff before/after, exit code, duration, effective model, that status line) and writes `HANDOFF.md` plus one line in `~/.local/state/agentplane/runs.jsonl`.
 
-Exit codes: `0` done · `1` provider failed · `2` usage/config · `3` safety boundary · `4` empty output · `124` timeout.
+Exit codes: `0` done · `1` provider failed · `2` usage/config · `3` safety boundary · `4` empty output · `124` timeout · `130`/`143` cancelled by SIGINT / SIGTERM (the provider is stopped and the run is still recorded).
 
 ```bash
 cat HANDOFF.md

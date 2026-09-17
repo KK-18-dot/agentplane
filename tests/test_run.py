@@ -1,7 +1,10 @@
 import json
 import os
 import re
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -262,6 +265,79 @@ def test_no_fallback_flag(project: Path, fake_cli) -> None:
     assert outcome.code == 1 and outcome.status == "quota-exhausted"
 
 
+FALLBACK_ROLES = """
+[roles.wr]
+provider = "fakecli"
+fallback = "ro_mock"
+
+[roles.ro_mock]
+provider = "mock"
+read_only = true
+
+[roles.ro_first]
+provider = "fakecli"
+read_only = true
+fallback = "wr_mock"
+
+[roles.wr_mock]
+provider = "mock"
+
+[providers.mock.writes]
+"leak.txt" = "written by the fallback"
+"""
+
+
+def test_fallback_keeps_a_read_only_fallback_role_read_only(project: Path, fake_cli) -> None:
+    toml = project / "agentplane.toml"
+    toml.write_text(toml.read_text() + FALLBACK_ROLES, encoding="utf-8")
+    fake_cli(script="echo 'usage limit reached'; exit 1")
+    outcome = _run(project, "wr")
+    assert outcome.record.provider == "mock" and outcome.record.fallback_from
+    assert outcome.record.read_only is True
+    assert not (project / "leak.txt").exists()
+
+
+def test_fallback_from_a_read_only_route_stays_read_only(project: Path, fake_cli) -> None:
+    toml = project / "agentplane.toml"
+    toml.write_text(toml.read_text() + FALLBACK_ROLES, encoding="utf-8")
+    fake_cli(script="echo 'usage limit reached'; exit 1")
+    outcome = _run(project, "ro_first")
+    assert outcome.record.provider == "mock" and outcome.record.read_only is True
+    assert not (project / "leak.txt").exists()
+
+
+# ---- cancellation ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sig, code", [(signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 143)])
+def test_cancel_stops_the_provider_and_still_records_the_run(
+    project: Path, fake_cli, sandbox: Path, sig: int, code: int
+) -> None:
+    marker = sandbox / "marker"
+    fake_cli(script=f"sleep 2; touch {marker}; echo finished")
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "agentplane", "run", "--role", "shim", "--dir", str(project), "--quiet", "slow task"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env={**os.environ},
+    )
+    started = sandbox / "fakecli.env"  # the shim writes it once it has read the task
+    deadline = time.monotonic() + 10
+    while not started.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert started.exists(), proc.communicate(timeout=10)
+    proc.send_signal(sig)
+    _, err = proc.communicate(timeout=40)
+    assert proc.returncode == code, err
+    time.sleep(3)
+    assert not marker.exists(), "the provider kept running after agentplane was cancelled"
+    rows = read_records()
+    assert len(rows) == 1, "cancelled must never trigger the fallback"
+    assert rows[0]["status"] == "cancelled" and rows[0]["exit"] == code and rows[0]["provider"] == "fakecli"
+    assert "- status: cancelled" in (project / "HANDOFF.md").read_text()
+
+
 # ---- safety boundaries ------------------------------------------------------------------------
 
 
@@ -296,6 +372,47 @@ def test_forbidden_flags_in_provider_command_are_rejected(project: Path) -> None
     route = resolve_route(cfg, role="shim")
     with pytest.raises(SafetyError, match="forbidden flag"):
         build_command(cfg, route, "task", project)
+
+
+@pytest.mark.parametrize(
+    "key, value",
+    [
+        ("command", ["fakecli", "--permission-mode", "bypassPermissions"]),
+        ("command", ["fakecli", "--sandbox=danger-full-access"]),
+        ("command", ["fakecli", "--dangerously-skip-permissions=true"]),
+        ("command", ["fakecli", "--dangerously-bypass-approvals-and-sandbox"]),
+        ("command", ["fakecli", "-c", "sandbox_mode=danger-full-access"]),
+        ("command", ["fakecli", "-c", 'sandbox_mode="danger-full-access"']),
+        ("command", ["fakecli", "--yolo"]),
+        ("command", ["fakecli", "--force"]),
+        ("command", ["fakecli", "--force=true"]),
+        ("command", ["fakecli", "-f"]),
+        ("write_args", ["--approval-mode", "yolo"]),
+        ("write_args", ["--approval-mode=YOLO"]),
+        ("write_args", ["-y"]),
+        ("model_args", ["-f", "{model}"]),
+        ("write_mode", "bypassPermissions"),
+        ("write_mode", "danger-full-access"),
+        ("task_stdin_marker", "--yolo"),
+    ],
+)
+def test_forbidden_flag_spellings_and_values_are_rejected(project: Path, key: str, value) -> None:
+    cfg = load_config(project)
+    cfg.providers["fakecli"][key] = value
+    route = resolve_route(cfg, role="shim")
+    with pytest.raises(SafetyError, match="forbidden flag"):
+        build_command(cfg, route, "task", project)
+
+
+@pytest.mark.parametrize("task", ["yolo", "-f", "--force", "--dangerously-skip-permissions"])
+def test_task_text_is_not_mistaken_for_a_forbidden_flag(project: Path, task: str) -> None:
+    cfg = load_config(project)
+    cfg.providers["fakecli"].update(task_via="arg", command=["fakecli", "--mode", "{permission_mode}"])
+    argv, _ = build_command(cfg, resolve_route(cfg, role="shim"), task, project)
+    assert argv[-1] == task
+    cfg.providers["fakecli"]["command"] = ["fakecli", "--prompt={task}"]
+    argv, _ = build_command(cfg, resolve_route(cfg, role="shim"), task, project)
+    assert argv[1] == f"--prompt={task}"
 
 
 def test_unavailable_provider_is_a_clear_usage_error(project: Path) -> None:

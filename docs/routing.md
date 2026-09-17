@@ -45,7 +45,9 @@ Raise the **model** when a judgment task is still wrong after more context and h
 
 ## Fallback
 
-`fallback = "other_role"` retries the same task once on another route, only when the first run failed for a reason unrelated to the task: the provider reported quota exhaustion or a missing login (matched against the provider's `quota_markers` / `auth_markers` in the last 64 KB of the log). Ordinary failures and timeouts are never retried automatically. Both runs are recorded in the ledger, and the HANDOFF names the original route and its log.
+`fallback = "other_role"` retries the same task once on another route, only when the first run failed for a reason unrelated to the task: the provider reported quota exhaustion or a missing login (matched against the provider's `quota_markers` / `auth_markers` in the last 64 KB of the log). Ordinary failures, timeouts and cancelled runs are never retried automatically. Both runs are recorded in the ledger, and the HANDOFF names the original route and its log.
+
+A fallback never loosens read-only. If the first run was read-only (from the role or `--read-only`), the fallback runs read-only too; otherwise the fallback role's own `read_only` applies.
 
 `--no-fallback` disables it for one run.
 

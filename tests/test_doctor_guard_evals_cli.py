@@ -49,6 +49,23 @@ def test_doctor_detects_retired_models_and_tracked_secret_names(project: Path) -
     assert ".env.example" not in text
 
 
+def test_doctor_warns_on_forbidden_flags_before_anything_runs(project: Path, capsys) -> None:
+    toml = project / "agentplane.toml"
+    toml.write_text(
+        toml.read_text()
+        + '\n[providers.risky]\ncommand = ["risky", "--sandbox", "{permission_mode}"]\n'
+        + 'write_mode = "danger-full-access"\nread_only_mode = "read-only"\n'
+        + 'read_only_args = ["--approval-mode", "yolo"]\n',
+        encoding="utf-8",
+    )
+    text = run_doctor(project).render()
+    assert "WARN provider risky: forbidden flag or value 'danger-full-access' in write_mode" in text
+    assert "WARN provider risky: forbidden flag or value 'yolo' in read_only_args" in text
+    assert "provider fakecli: forbidden" not in text
+    assert main(["run", "--provider", "risky", "--dir", str(project), "--dry-run", "x"]) == 3
+    assert "forbidden flag" in capsys.readouterr().err
+
+
 def test_doctor_reports_broken_config_as_warn(sandbox: Path) -> None:
     proj = sandbox / "work" / "broken"
     proj.mkdir(parents=True)

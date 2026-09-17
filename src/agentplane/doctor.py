@@ -18,6 +18,7 @@ from .config import Config, load_config, state_dir
 from .errors import AgentplaneError
 from .render import is_generated, render
 from .routing import all_provider_status, explain_routes
+from .run import forbidden_in_definition
 
 SECRET_NAME_GLOBS = [
     ".env",
@@ -142,6 +143,12 @@ def _check_providers(cfg: Config, report: Report) -> None:
             "no real provider CLI found; only the mock provider will run. "
             "Install one (claude, codex, cursor, gemini, ollama) and rerun."
         )
+    for name in sorted(cfg.providers):
+        for key, arg in forbidden_in_definition(cfg.providers[name]):
+            report.warn(
+                f"provider {name}: forbidden flag or value {arg!r} in {key}; `agentplane run` refuses it "
+                "because it disables the harness's own approvals or sandbox (remove it from the provider table)"
+            )
     for row in explain_routes(cfg):
         if row.get("problem"):
             report.warn(f"role {row['role']}: {row['problem']}")

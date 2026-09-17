@@ -103,7 +103,12 @@ Placeholders available in `command` and the `*_args` lists: `{model}`, `{effort}
 
 With `task_via = "arg"`, `{task}` is substituted where it appears; if it appears nowhere the task is appended as the last argument.
 
-agentplane refuses commands containing `--dangerously-skip-permissions`, `--dangerously-bypass-approvals-and-sandbox`, `--yolo`, or `--force`.
+agentplane refuses (exit 3) any provider argv element that switches off the harness's own approvals or sandbox:
+
+- a flag starting with `--dangerously-`, or the flags `--yolo`, `--force`, `-f`, `-y` (also written `--flag=value`);
+- the values `bypassPermissions`, `danger-full-access`, `yolo`, whether they are a separate element (`--permission-mode bypassPermissions`) or follow `=` (`--sandbox=danger-full-access`, `-c sandbox_mode=danger-full-access`). Quotes are stripped and case is ignored.
+
+The check covers `command`, `model_args`, `effort_args`, `read_only_args`, `write_args`, `write_mode`, `read_only_mode` and `task_stdin_marker`, after placeholder expansion. The task text is not inspected. `agentplane doctor` applies the same check to every provider table (built-in, user, pack, project) and reports a WARN, so a bad definition shows up before anyone runs it. `-f` and `-y` are refused for every provider, because Cursor and Gemini CLI use them as short forms of `--force` and `--yolo`; if your own CLI uses them for something harmless, use its long option instead.
 
 ### Mock provider
 

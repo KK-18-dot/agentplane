@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import state_dir
-from .errors import AgentplaneError
+from .errors import EXIT_CANCELLED_INT, EXIT_CANCELLED_TERM, AgentplaneError
 
 SELF_REPORT_VALUES = ("DONE_WITH_CONCERNS", "DONE", "BLOCKED", "NEEDS_CONTEXT")
 SELF_REPORT_RE = re.compile(
@@ -144,6 +144,12 @@ def status_for(code: int, self_reported: str, kind: str | None) -> tuple[str, st
         )
     if code == 124:
         return ("timeout", "Timed out; raise --timeout, split the task, or pick a faster route.")
+    if code in (EXIT_CANCELLED_INT, EXIT_CANCELLED_TERM):
+        return (
+            "cancelled",
+            "Cancelled by a signal; the provider was stopped mid-run. Check `changed` for partial edits "
+            "before resubmitting.",
+        )
     if kind == "quota-exhausted":
         return (
             "quota-exhausted",

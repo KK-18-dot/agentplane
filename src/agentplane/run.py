@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -22,7 +23,16 @@ from pathlib import Path
 from typing import BinaryIO
 
 from .config import Config, state_dir
-from .errors import EXIT_EMPTY, EXIT_TIMEOUT, AgentplaneError, ConfigError, SafetyError, UsageError
+from .errors import (
+    EXIT_CANCELLED_INT,
+    EXIT_CANCELLED_TERM,
+    EXIT_EMPTY,
+    EXIT_TIMEOUT,
+    AgentplaneError,
+    ConfigError,
+    SafetyError,
+    UsageError,
+)
 from .handoff import (
     PREAMBLE,
     RunRecord,
@@ -36,12 +46,16 @@ from .handoff import (
 from .routing import Route, provider_status, resolve_route
 
 DEPTH_VAR = "AGENTPLANE_DEPTH"
-FORBIDDEN_FLAGS = {
-    "--dangerously-skip-permissions",
-    "--dangerously-bypass-approvals-and-sandbox",
-    "--yolo",
-    "--force",
-}
+FORBIDDEN_PREFIX = "--dangerously-"
+# -f / -y are the short forms of --force (Cursor) and --yolo (Gemini CLI).
+FORBIDDEN_FLAGS = {"--yolo", "--force", "-f", "-y"}
+# Values that select a harness's unattended mode, whether passed as the next argument
+# (--permission-mode bypassPermissions), after "=" (--sandbox=danger-full-access), or in a
+# config override (-c sandbox_mode=danger-full-access).
+FORBIDDEN_VALUES = {"bypasspermissions", "danger-full-access", "yolo"}
+PROVIDER_ARG_KEYS = ("command", "model_args", "effort_args", "read_only_args", "write_args")
+PROVIDER_SCALAR_KEYS = ("write_mode", "read_only_mode", "task_stdin_marker")
+CANCEL_SIGNALS = ("SIGINT", "SIGTERM", "SIGHUP")
 
 
 @dataclass
@@ -103,6 +117,35 @@ def check_depth(cfg: Config) -> int:
 # ---- command assembly ----------------------------------------------------------------------------
 
 
+def is_forbidden_arg(arg: str) -> bool:
+    """True when an argv element would switch off a harness's own approvals or sandbox.
+
+    Exact matching let ``--dangerously-skip-permissions=true`` or ``--approval-mode yolo``
+    through, so the flag name before ``=`` and any value (the element itself or the part after
+    ``=``, quotes stripped, case-insensitive) are checked as well.
+    """
+    name, sep, value = arg.partition("=")
+    if name.startswith(FORBIDDEN_PREFIX) or name in FORBIDDEN_FLAGS:
+        return True
+    candidates = (arg, value) if sep else (arg,)
+    return any(c.strip("'\" ").lower() in FORBIDDEN_VALUES for c in candidates)
+
+
+def forbidden_in_definition(spec: dict) -> list[tuple[str, str]]:
+    """(key, element) pairs in a provider table that ``build_command`` would refuse.
+
+    Used by ``doctor`` so a bad user or pack definition surfaces before anyone runs it.
+    """
+    hits: list[tuple[str, str]] = []
+    for key in PROVIDER_ARG_KEYS:
+        hits.extend((key, part) for part in spec.get(key, []) or [] if is_forbidden_arg(part))
+    for key in PROVIDER_SCALAR_KEYS:
+        value = spec.get(key)
+        if isinstance(value, str) and value and is_forbidden_arg(value):
+            hits.append((key, value))
+    return hits
+
+
 def empty_mcp_path() -> Path:
     path = state_dir() / "empty-mcp.json"
     if not path.is_file():
@@ -126,12 +169,17 @@ def build_command(cfg: Config, route: Route, task: str, target: Path) -> tuple[l
         "permission_mode": spec.get(mode_key, ""),
     }
     argv: list[str] = []
+    # The task text is the user's, not configuration: check each element with the task blanked
+    # so a task that happens to read "yolo" or "-f" is never refused.
+    checked: list[str] = []
+    no_task = {**values, "task": ""}
 
     def add(parts: list[str]) -> None:
         for part in parts:
             if "{permission_mode}" in part and not values["permission_mode"]:
                 raise ConfigError(f"provider {route.provider}: '{mode_key}' is required by its command template")
             argv.append(part.format_map(values))
+            checked.append(part.format_map(no_task))
 
     add(list(spec.get("command", [])))
     if route.model and spec.get("model_args"):
@@ -148,15 +196,19 @@ def build_command(cfg: Config, route: Route, task: str, target: Path) -> tuple[l
         marker = spec.get("task_stdin_marker")
         if marker:
             argv.append(marker)
+            checked.append(marker)
         stdin_text = task
     else:
         if not any("{task}" in part for part in spec.get("command", [])):
             argv.append(task)
         stdin_text = None
 
-    for arg in argv:
-        if arg in FORBIDDEN_FLAGS:
-            raise SafetyError(f"provider {route.provider} command contains a forbidden flag: {arg}")
+    for arg in checked:
+        if is_forbidden_arg(arg):
+            raise SafetyError(
+                f"provider {route.provider} command contains a forbidden flag or value: {arg!r} "
+                "(it would disable the harness's own approvals or sandbox)"
+            )
     return argv, stdin_text
 
 
@@ -382,8 +434,53 @@ def _run_mock(cfg: Config, route: Route, task: str, target: Path, log: BinaryIO,
     return code
 
 
+class CancelTrap:
+    """Turn SIGINT / SIGTERM / SIGHUP into a recorded cancellation while a provider runs.
+
+    Providers start in their own session so a terminal's Ctrl-C never reaches them directly.
+    Without this trap agentplane itself died on the signal and left the provider running, with
+    no HANDOFF and no ledger row. The handler only records the signal; the wait loop in
+    ``_run_cli`` stops the provider's process group and the run is recorded as ``cancelled``.
+    Signals the caller already ignores (``nohup``, background jobs) stay ignored, and handlers
+    can only be installed from the main thread, so the trap is inert elsewhere.
+    """
+
+    def __init__(self) -> None:
+        self.received: int | None = None  # first signal seen while armed
+        self.cancelled: int | None = None  # the signal that actually stopped the provider
+        self._previous: dict[int, object] = {}
+
+    def __enter__(self) -> CancelTrap:
+        if threading.current_thread() is threading.main_thread():
+            for name in CANCEL_SIGNALS:
+                sig = getattr(signal, name, None)
+                if sig is not None and signal.getsignal(sig) is not signal.SIG_IGN:
+                    self._previous[sig] = signal.signal(sig, self._record)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        for sig, previous in self._previous.items():
+            signal.signal(sig, previous if previous is not None else signal.SIG_DFL)
+        self._previous.clear()
+
+    def _record(self, signum: int, frame: object) -> None:
+        if self.received is None:
+            self.received = signum
+
+    @property
+    def exit_code(self) -> int:
+        return EXIT_CANCELLED_INT if self.cancelled == signal.SIGINT else EXIT_CANCELLED_TERM
+
+
 def _run_cli(
-    argv: list[str], stdin_text: str | None, env: dict[str, str], cwd: Path, timeout: int, log: BinaryIO, echo: bool
+    argv: list[str],
+    stdin_text: str | None,
+    env: dict[str, str],
+    cwd: Path,
+    timeout: int,
+    log: BinaryIO,
+    echo: bool,
+    trap: CancelTrap,
 ) -> int:
     try:
         proc = subprocess.Popen(
@@ -407,27 +504,44 @@ def _run_cli(
                 sys.stdout.buffer.write(chunk)
                 sys.stdout.buffer.flush()
 
-    reader = threading.Thread(target=pump, daemon=True)
-    reader.start()
-    if stdin_text is not None and proc.stdin is not None:
+    def feed() -> None:
+        # In a thread: a provider that never reads a large task must not block the timeout
+        # and cancellation checks below.
+        assert proc.stdin is not None and stdin_text is not None
         try:
             proc.stdin.write(stdin_text.encode("utf-8"))
             proc.stdin.close()
-        except BrokenPipeError:
+        except (BrokenPipeError, OSError, ValueError):
             pass
+
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    if stdin_text is not None and proc.stdin is not None:
+        threading.Thread(target=feed, daemon=True).start()
     timed_out = False
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        _terminate(proc)
+    deadline = time.monotonic() + timeout
+    while True:
+        if trap.received is not None:
+            trap.cancelled = trap.received
+            _terminate(proc)
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            timed_out = True
+            _terminate(proc)
+            break
+        try:
+            proc.wait(timeout=min(remaining, 0.2))
+            break
+        except subprocess.TimeoutExpired:
+            continue
     reader.join(timeout=30)
+    if trap.cancelled is not None:
+        return trap.exit_code
     return EXIT_TIMEOUT if timed_out else proc.returncode
 
 
 def _terminate(proc: subprocess.Popen) -> None:
-    import signal
-
     try:
         os.killpg(proc.pid, signal.SIGTERM)
     except (ProcessLookupError, PermissionError):
@@ -476,26 +590,38 @@ def run_task(
 
     before = git_state(target)
     start = time.monotonic()
+    trap = CancelTrap()
     with os.fdopen(log_fd, "w+b") as log:
         if spec.get("kind", "cli") == "mock":
             code = _run_mock(cfg, route, task, target, log, echo)
         else:
             env = build_env(cfg, route, depth)
-            code = _run_cli(argv, stdin_text, env, target, route.timeout, log, echo)
+            with trap:
+                code = _run_cli(argv, stdin_text, env, target, route.timeout, log, echo, trap)
         seconds = int(time.monotonic() - start)
         log.flush()
         log.seek(0)
         log_text = log.read().decode("utf-8", errors="replace")
-    if code == 0 and len(log_text.encode("utf-8")) < int(cfg.run.get("min_output_bytes", 200)):
-        print(f"agentplane: warning: exit 0 but output is shorter than min_output_bytes: {log_path}", file=sys.stderr)
-        code = EXIT_EMPTY
-    kind = (
-        failure_kind(log_text, spec.get("quota_markers", []) or [], spec.get("auth_markers", []) or [])
-        if code not in (0, EXIT_EMPTY, EXIT_TIMEOUT)
-        else None
-    )
+    if trap.cancelled is not None:
+        # A provider's own exit status 130/143 is an ordinary failure; only agentplane's trap
+        # makes a run "cancelled", and a cancelled run is never classified or retried.
+        exit_code, kind = trap.exit_code, None
+        print(f"agentplane: cancelled by {signal.Signals(trap.cancelled).name}; provider stopped", file=sys.stderr)
+    else:
+        if code == 0 and len(log_text.encode("utf-8")) < int(cfg.run.get("min_output_bytes", 200)):
+            print(
+                f"agentplane: warning: exit 0 but output is shorter than min_output_bytes: {log_path}",
+                file=sys.stderr,
+            )
+            code = EXIT_EMPTY
+        exit_code = code if code in (0, EXIT_EMPTY, EXIT_TIMEOUT) else 1
+        kind = (
+            failure_kind(log_text, spec.get("quota_markers", []) or [], spec.get("auth_markers", []) or [])
+            if exit_code == 1
+            else None
+        )
     reported = self_report(log_text)
-    status_name, next_note = status_for(code if code in (0, EXIT_EMPTY, EXIT_TIMEOUT) else 1, reported, kind)
+    status_name, next_note = status_for(exit_code, reported, kind)
 
     changed = diff_git_state(before, git_state(target))
 
@@ -509,7 +635,7 @@ def run_task(
         dir=str(target),
         out=str(out_path),
         log=str(log_path),
-        exit=code if code in (0, EXIT_EMPTY, EXIT_TIMEOUT) else 1,
+        exit=exit_code,
         status=status_name,
         seconds=seconds,
         self_report=reported,
@@ -528,11 +654,13 @@ def run_task(
             f"agentplane: {route.provider} reported {kind}; retrying once via fallback role {route.fallback}",
             file=sys.stderr,
         )
+        # Fallback may only tighten read-only: passing False here would override a fallback
+        # role that declares read_only = true and run it writable.
         fb_route = resolve_route(
             cfg,
             role=route.fallback,
             timeout=int(route.explicit["timeout"]) if "timeout" in route.explicit else None,
-            read_only=route.read_only,
+            read_only=True if route.read_only else None,
         )
         return run_task(
             cfg,

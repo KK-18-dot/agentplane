@@ -12,6 +12,10 @@ Every `agentplane run` ends the same way regardless of provider: an exit code, a
 | 3 | safety boundary: `--dir` is `$HOME` or above, `--out` outside `--dir` or a symlink, delegation depth exceeded, forbidden flag, secret-like env name |
 | 4 | provider exited 0 but printed less than `[run] min_output_bytes` |
 | 124 | timeout (SIGTERM, then SIGKILL after 15 s, to the whole process group) |
+| 130 | cancelled: agentplane received SIGINT while the provider ran |
+| 143 | cancelled: agentplane received SIGTERM or SIGHUP while the provider ran |
+
+Providers run in their own session, so Ctrl-C in a terminal reaches agentplane, not the provider. While a provider runs, agentplane traps SIGINT, SIGTERM and SIGHUP, stops the provider's process group the same way a timeout does, and then finishes normally: the HANDOFF and the ledger row are written with status `cancelled` before it exits 130 or 143. A signal the caller already ignores (for example under `nohup`) stays ignored, and a signal that arrives after the provider has exited on its own does not change the recorded result. A provider that exits 130 or 143 by itself is an ordinary `failed` run; only agentplane's own trap produces `cancelled`.
 
 ## Status vocabulary
 
@@ -25,6 +29,7 @@ Every `agentplane run` ends the same way regardless of provider: an exit code, a
 | `needs-context` | exit 0, claim `NEEDS_CONTEXT` |
 | `empty-output` | exit 4 |
 | `timeout` | exit 124 |
+| `cancelled` | exit 130 / 143; never retried on the fallback role |
 | `quota-exhausted` / `auth-required` | exit 1 and the log tail matches the provider's markers |
 | `failed` | any other exit 1 |
 | `handoff-write-failed` | the run finished but the HANDOFF could not be written safely |

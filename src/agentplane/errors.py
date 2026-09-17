@@ -6,6 +6,8 @@
 3   safety boundary violated (bad --dir, forbidden output path, recursion, secret-like env)
 4   provider exited 0 but produced (almost) no output
 124 timeout
+130 cancelled by SIGINT (the provider's process group was terminated; HANDOFF and ledger written)
+143 cancelled by SIGTERM or SIGHUP (same)
 """
 
 EXIT_OK = 0
@@ -14,6 +16,8 @@ EXIT_USAGE = 2
 EXIT_SAFETY = 3
 EXIT_EMPTY = 4
 EXIT_TIMEOUT = 124
+EXIT_CANCELLED_INT = 130
+EXIT_CANCELLED_TERM = 143
 
 
 class AgentplaneError(Exception):
