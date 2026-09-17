@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import Config, state_dir
+from .config import Config, ensure_state_dir
 from .errors import UsageError
 from .routing import resolve_route
 from .run import run_task
@@ -152,7 +152,7 @@ def run_suite(
         if not cases:
             raise UsageError(f"no case matches --only {only!r}")
     stamp = time.strftime("%Y%m%d%H%M%S")
-    results_dir = results_dir or (state_dir() / "evals" / f"{suite_dir.name}-{stamp}")
+    results_dir = results_dir or (ensure_state_dir("evals") / f"{suite_dir.name}-{stamp}")
     results_dir.mkdir(parents=True, exist_ok=True)
     results_path = results_dir / "results.jsonl"
     results: list[CaseResult] = []

@@ -1,9 +1,10 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
 from agentplane.cli import main
-from agentplane.config import load_config
+from agentplane.config import load_config, state_dir
 from agentplane.doctor import run_doctor
 from agentplane.evals import load_results, render_report, run_suite
 from agentplane.guard import check_paths, claude_hook
@@ -64,6 +65,24 @@ def test_doctor_warns_on_forbidden_flags_before_anything_runs(project: Path, cap
     assert "provider fakecli: forbidden" not in text
     assert main(["run", "--provider", "risky", "--dir", str(project), "--dry-run", "x"]) == 3
     assert "forbidden flag" in capsys.readouterr().err
+
+
+def test_doctor_warns_when_state_is_readable_by_others(project: Path) -> None:
+    render(load_config(project))
+    sd = state_dir()
+    sd.mkdir(parents=True)
+    os.chmod(sd, 0o755)
+    ledger = sd / "runs.jsonl"
+    ledger.write_text("", encoding="utf-8")
+    os.chmod(ledger, 0o644)
+    text = run_doctor(project).render()
+    assert f"WARN state directory {sd} is accessible by group/other (mode 755)" in text
+    assert f"WARN run ledger {ledger} is readable by group/other (mode 644)" in text
+    assert "chmod -R go-rwx" in text
+    os.chmod(sd, 0o700)
+    os.chmod(ledger, 0o600)
+    text = run_doctor(project).render()
+    assert "state directory" in text and "accessible by group/other" not in text
 
 
 def test_doctor_reports_broken_config_as_warn(sandbox: Path) -> None:
@@ -144,6 +163,7 @@ def test_bundled_smoke_suite_passes_offline(project: Path) -> None:
     cfg = load_config(project)
     _, results = run_suite(cfg, suite, role="dry", provider=None, trials=1, results_dir=None)
     assert results and all(r.passed for r in results), [(r.case, r.reasons) for r in results]
+    assert (state_dir() / "evals").stat().st_mode & 0o777 == 0o700
 
 
 # ---- cli ----------------------------------------------------------------------------------------

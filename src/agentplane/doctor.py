@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .config import Config, load_config, state_dir
+from .config import Config, ensure_state_dir, load_config, state_dir
 from .errors import AgentplaneError
+from .handoff import ledger_path
 from .render import is_generated, render
 from .routing import all_provider_status, explain_routes
 from .run import forbidden_in_definition
@@ -186,6 +188,8 @@ def _check_render(cfg: Config, report: Report) -> None:
         return
     for res in results:
         rel = res.path.relative_to(cfg.project_dir)
+        if res.too_large:
+            report.warn(f"render target {res.target}: {rel} is {res.size_note}")
         if res.action == "unchanged":
             report.ok(f"render target {res.target}: {rel} in sync")
         elif res.action == "missing":
@@ -202,10 +206,25 @@ def _check_render(cfg: Config, report: Report) -> None:
 def _check_state(report: Report) -> None:
     sd = state_dir()
     try:
-        sd.mkdir(parents=True, exist_ok=True)
+        ensure_state_dir()
         probe = sd / ".write-probe"
         probe.write_text("ok", encoding="utf-8")
         probe.unlink()
         report.ok(f"state directory writable: {sd}")
     except OSError as exc:
         report.warn(f"state directory not writable: {sd} ({exc})")
+        return
+    # Directories created by agentplane 0.1.0 (or by hand) follow the umask; logs hold full
+    # provider output, so an open state directory is a finding, with the one-line fix.
+    fix = f"chmod -R go-rwx {shlex.quote(str(sd))}"
+    mode = sd.stat().st_mode & 0o777
+    if mode & 0o077:
+        report.warn(
+            f"state directory {sd} is accessible by group/other (mode {mode:o}); "
+            f"it holds provider logs and the run ledger: {fix}"
+        )
+    ledger = ledger_path()
+    if ledger.is_file():
+        ledger_mode = ledger.stat().st_mode & 0o777
+        if ledger_mode & 0o077:
+            report.warn(f"run ledger {ledger} is readable by group/other (mode {ledger_mode:o}): {fix}")

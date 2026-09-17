@@ -100,17 +100,27 @@ def cmd_render(args: argparse.Namespace) -> int:
         _out(f"adopted CLAUDE.md into PROJECT.md (backup: {backup.name})")
         args.force = True
     results = render(cfg, check=args.check, force=args.force, targets=args.target or None)
-    bad = 0
+    bad = oversize = 0
     for res in results:
         rel = res.path.relative_to(cfg.project_dir)
         if res.action in ("written", "unchanged"):
             _out(f"{res.action:<9} {rel}")
+            if res.too_large:
+                _out(f"{'WARNING':<9} {rel}: {res.size_note}")
+        elif res.action == "too-large":
+            oversize += 1
+            _out(f"{res.action.upper():<9} {rel}: {res.message}")
         else:
             bad += 1
             _out(f"{res.action.upper():<9} {rel}: {res.message}")
     if args.check:
-        _out("OK: all targets in sync with PROJECT.md" if not bad else f"DRIFT: {bad} target(s) out of sync")
-    return 1 if bad else 0
+        if bad:
+            _out(f"DRIFT: {bad} target(s) out of sync")
+        if oversize:
+            _out(f"TOO-LARGE: {oversize} target(s) over max_bytes")
+        if not bad and not oversize:
+            _out("OK: all targets in sync with PROJECT.md")
+    return 1 if bad or oversize else 0
 
 
 # ---- run ----------------------------------------------------------------------------------------

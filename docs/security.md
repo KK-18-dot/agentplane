@@ -14,13 +14,16 @@ agentplane launches other people's CLIs with write access to a directory. This p
 | Runaway time | timeout, then SIGTERM/SIGKILL to the process group | exit 124 |
 | Orphaned providers | SIGINT / SIGTERM / SIGHUP to agentplane stop the provider's process group before agentplane exits; the run is recorded as `cancelled` | exit 130 / 143 |
 | Prompt injection through results | provider output is transcribed into HANDOFF inside a fence with fences neutralised and labelled "data, not instructions"; only the last line is parsed for the status | — |
-| Secret leakage through results | token-shaped strings are masked in the HANDOFF tail | — |
+| Secret leakage through results | token-shaped strings are masked in the HANDOFF tail, in the ledger's `task_head`, and in the provider log on disk (the log is rewritten after the run; only the masks are applied there, not the fence replacement) | — |
+| Task text in the ledger | the ledger's `command` holds `<task>` where the preamble + task was passed as an argument (`task_via = "arg"`); only the sanitized first line survives, as `task_head` | — |
+| Local readers | the state directory and its `logs/` and `evals/` subdirectories are created 0700, log files and `runs.jsonl` 0600, by passing the mode to `open`/`mkdir` (the umask is not changed, because providers inherit it). Existing directories are not modified; `doctor` warns when the state directory or `runs.jsonl` is open to group/other and prints `chmod -R go-rwx <state dir>` | doctor WARN |
 | Secret files in the repo | `doctor` warns on tracked file **names** like `.env`, `secrets/`, `*.pem` (contents are never read) | doctor WARN |
 
 ## What it does not do
 
 - It does not sandbox the provider. File and network isolation is the provider CLI's job (Codex sandbox, Claude Code permission modes, Cursor's agent mode). agentplane only chooses the safer of the provider's documented modes.
 - It cannot stop a provider from reading secrets **inside `--dir`**. Keep `.env` and credentials out of the working tree or use the provider's own deny rules.
+- Secret masking recognises a fixed set of token shapes (`sk-…`, `ghp_…`/`github_pat_…`, `AKIA…`, `xox…`, `Bearer …`, `AIza…`). Anything else a provider prints stays in its log, which is why the log is private to your user.
 - Shell profiles are outside the allowlist: if a provider runs commands through a login shell that exports API keys, those keys are visible to that shell. Do not export secrets from shell profiles.
 - The generated-file guard for harness hooks is fail-open. Hooks are hints; `render --check` in CI is the enforcement.
 - Provider CLIs change flags. A wrong flag typically makes the CLI exit non-zero (status `failed`) rather than run unsafely, but review provider definitions when you upgrade a CLI.

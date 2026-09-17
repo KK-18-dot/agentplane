@@ -436,6 +436,96 @@ def test_secrets_in_provider_output_are_redacted_in_handoff(project: Path, fake_
     assert "ghp_abcdefghijklmnop123" not in handoff
 
 
+ARG_PROVIDERS = """
+[providers.argcli]
+binary = "argcli"
+command = ["argcli", "--print"]
+task_via = "arg"
+
+[providers.argtpl]
+binary = "argcli"
+command = ["argcli", "--prompt={task}", "--print"]
+task_via = "arg"
+
+[roles.arg]
+provider = "argcli"
+
+[roles.argtpl]
+provider = "argtpl"
+"""
+
+
+@pytest.mark.parametrize("role, recorded", [("arg", ["argcli", "--print", "<task>"]), ("argtpl", None)])
+def test_ledger_never_records_the_task_text(project: Path, fake_cli, role: str, recorded) -> None:
+    toml = project / "agentplane.toml"
+    toml.write_text(toml.read_text() + ARG_PROVIDERS, encoding="utf-8")
+    fake_cli("argcli")
+    task = "rotate the payment keys ghp_abcdefghijklmnop123 now\nsecond line with private detail"
+    _run(project, role, task)
+    raw = (state_dir() / "runs.jsonl").read_text()
+    row = json.loads(raw)
+    assert "second line with private detail" not in raw
+    assert "[agentplane preamble]" not in raw
+    assert "ghp_abcdefghijklmnop123" not in raw
+    assert row["task_head"] == "rotate the payment keys gh-REDACTED now"
+    assert row["command"] == (recorded or ["argcli", "--prompt=<task>", "--print"])
+
+
+def test_ledger_line_is_one_append_write(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    record = _run(project, "dry").record
+    calls: list[tuple[str, object]] = []
+    real_open, real_write = os.open, os.write
+
+    def spy_open(path, flags, *args, **kwargs):
+        calls.append(("open", flags))
+        return real_open(path, flags, *args, **kwargs)
+
+    def spy_write(fd, data):
+        calls.append(("write", data))
+        return real_write(fd, data)
+
+    with monkeypatch.context() as patched:  # undo only the spies, not the sandbox fixture
+        patched.setattr(handoff_mod.os, "open", spy_open)
+        patched.setattr(handoff_mod.os, "write", spy_write)
+        handoff_mod.append_record(record)
+    writes = [c for c in calls if c[0] == "write"]
+    assert len(writes) == 1 and writes[0][1].endswith(b"\n")
+    assert any(kind == "open" and flags & os.O_APPEND for kind, flags in calls)
+    assert len((state_dir() / "runs.jsonl").read_text().splitlines()) == 2
+
+
+def _mode(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+def test_state_files_are_private_and_the_provider_umask_is_untouched(
+    project: Path, fake_cli, sandbox: Path
+) -> None:
+    fake_cli(script=f"umask > {sandbox / 'umask.txt'}; echo 'enough output to count'; echo 'AGENTPLANE-STATUS: DONE'")
+    previous = os.umask(0o022)
+    try:
+        record = _run(project, "shim").record
+    finally:
+        os.umask(previous)
+    assert _mode(state_dir()) == 0o700
+    assert _mode(state_dir() / "logs") == 0o700
+    assert _mode(Path(record.log)) == 0o600
+    assert _mode(state_dir() / "runs.jsonl") == 0o600
+    assert (sandbox / "umask.txt").read_text().strip() == "0022"
+
+
+def test_secrets_are_masked_in_the_log_kept_on_disk(project: Path, fake_cli) -> None:
+    fake_cli(
+        script="printf 'y%.0s' $(seq 300); echo; echo 'token ghp_abcdefghijklmnop123 sk-abcdefghij12345'; "
+        "echo '```'; printf 'bad \\377 byte\\n'; echo 'AGENTPLANE-STATUS: DONE'"
+    )
+    log = Path(_run(project, "shim").record.log).read_bytes()
+    assert b"ghp_abcdefghijklmnop123" not in log and b"sk-abcdefghij12345" not in log
+    assert b"gh-REDACTED" in log and b"sk-REDACTED" in log
+    assert b"```" in log  # only secrets are masked; the log is not a HANDOFF
+    assert b"bad \xff byte" in log  # bytes that are not UTF-8 survive the rewrite
+
+
 def test_ledger_is_valid_jsonl(project: Path) -> None:
     _run(project, "dry")
     _run(project, "dry")

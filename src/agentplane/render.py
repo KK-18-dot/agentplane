@@ -25,8 +25,21 @@ MODEL_TOKEN_RE = re.compile(r"\{\{model:([A-Za-z0-9_-]+)\}\}")
 class RenderResult:
     target: str
     path: Path
-    action: str  # written | unchanged | drift | refused | missing
+    action: str  # written | unchanged | drift | refused | missing | too-large (check mode only)
     message: str = ""
+    size: int = 0  # bytes of the rendered text
+    max_bytes: int | None = None  # the target's declared read limit, if any
+
+    @property
+    def too_large(self) -> bool:
+        return self.max_bytes is not None and self.size > self.max_bytes
+
+    @property
+    def size_note(self) -> str:
+        return (
+            f"{self.size} bytes, over max_bytes {self.max_bytes}: the harness may ignore everything past "
+            "that point (shorten PROJECT.md or the appendix, or raise max_bytes if you raised the harness limit)"
+        )
 
 
 def is_generated(path: Path) -> bool:
@@ -118,23 +131,32 @@ def render(
             raise UsageError(f"unknown target {name!r}")
         out = cfg.project_dir / cfg.targets[name]["path"]
         text = render_text(cfg, name, policy_text)
+        # Some harnesses stop reading an instruction file at a fixed size (Codex: 32 KiB), so an
+        # oversized target silently loses its tail. It is still written; check mode fails on it.
+        size = {"size": len(text.encode("utf-8")), "max_bytes": cfg.targets[name].get("max_bytes")}
         current = out.read_text(encoding="utf-8") if out.is_file() else None
         if check:
             if current is None:
-                results.append(RenderResult(name, out, "missing", "not rendered yet"))
+                res = RenderResult(name, out, "missing", "not rendered yet", **size)
             elif current != text:
-                results.append(RenderResult(name, out, "drift", "differs from PROJECT.md"))
+                res = RenderResult(name, out, "drift", "differs from PROJECT.md", **size)
             else:
-                results.append(RenderResult(name, out, "unchanged"))
+                res = RenderResult(name, out, "unchanged", **size)
+                if res.too_large:
+                    res.action, res.message = "too-large", res.size_note
+            results.append(res)
             continue
         if current is not None and not force and not is_generated(out):
             results.append(
-                RenderResult(name, out, "refused", "hand-written file (no generated marker); use --adopt or --force")
+                RenderResult(
+                    name, out, "refused", "hand-written file (no generated marker); use --adopt or --force", **size
+                )
             )
             continue
-        if current == text:
-            results.append(RenderResult(name, out, "unchanged"))
-            continue
-        _atomic_write(out, text)
-        results.append(RenderResult(name, out, "written"))
+        if current != text:
+            _atomic_write(out, text)
+        res = RenderResult(name, out, "unchanged" if current == text else "written", **size)
+        if res.too_large:
+            res.message = res.size_note
+        results.append(res)
     return results

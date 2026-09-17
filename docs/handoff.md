@@ -105,6 +105,8 @@ The file is written with mode 0600 through a directory file descriptor with `O_N
 
 `agentplane runs --json` dumps it; any tool can aggregate it.
 
+The ledger and the logs are created with mode 0600 inside a 0700 state directory. Each line is appended with one `write` call, so concurrent runs do not interleave. `command` is the argv agentplane built, with the preamble + task replaced by `<task>` when the provider takes the task as an argument; `task_head` is the first line of the task with token shapes masked, cut to 120 characters. The log keeps the full provider output with the same token shapes masked.
+
 ## Accepting a result
 
 A self-report is a claim. Before accepting:

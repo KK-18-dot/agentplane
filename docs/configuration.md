@@ -45,7 +45,20 @@ Each target appends `.agentplane/appendix/<target>.md` if that file exists. Defi
 path = "docs/MYTOOL.md"
 frontmatter = "---\nkind: rules\n---\n"
 appendix = ".agentplane/appendix/mytool.md"
+max_bytes = 65536        # optional; see below
 ```
+
+### `max_bytes`
+
+Some harnesses read an instruction file only up to a fixed size and silently drop the rest. Codex CLI reads at most `project_doc_max_bytes` of `AGENTS.md` (32768 bytes in Codex CLI 0.153.4), so the built-in `codex` target sets `max_bytes = 32768`. The other built-in targets set no limit; add one when the harness you use documents a limit.
+
+When the rendered file (frontmatter, marker, policy and appendix together) is larger than `max_bytes`:
+
+- `agentplane render` still writes it and prints a `WARNING` line (exit 0);
+- `agentplane render --check` reports `TOO-LARGE` and exits 1, like drift;
+- `agentplane doctor` reports a WARN.
+
+If you raised the limit in the harness itself (for Codex, `project_doc_max_bytes` in its `config.toml`), raise it here too, for example `[targets.codex] max_bytes = 65536` in `agentplane.toml`. The value must be a positive integer.
 
 ## `[models]`
 
@@ -149,6 +162,6 @@ See [packs.md](packs.md).
 
 | Variable | Effect |
 |---|---|
-| `AGENTPLANE_STATE_DIR` | where logs, `runs.jsonl`, and eval results go (default `$XDG_STATE_HOME/agentplane`) |
+| `AGENTPLANE_STATE_DIR` | where logs, `runs.jsonl`, and eval results go (default `$XDG_STATE_HOME/agentplane`); created with mode 0700 when missing |
 | `XDG_CONFIG_HOME` | location of the user config layer |
 | `AGENTPLANE_DEPTH` | set by agentplane for providers it launches; do not set by hand |

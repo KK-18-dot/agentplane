@@ -22,7 +22,7 @@ from importlib import resources
 from pathlib import Path
 from typing import BinaryIO
 
-from .config import Config, state_dir
+from .config import Config, ensure_state_dir
 from .errors import (
     EXIT_CANCELLED_INT,
     EXIT_CANCELLED_TERM,
@@ -38,9 +38,11 @@ from .handoff import (
     RunRecord,
     append_record,
     failure_kind,
+    mask_secrets_bytes,
     new_run_id,
     self_report,
     status_for,
+    task_head,
     write_handoff,
 )
 from .routing import Route, provider_status, resolve_route
@@ -147,9 +149,8 @@ def forbidden_in_definition(spec: dict) -> list[tuple[str, str]]:
 
 
 def empty_mcp_path() -> Path:
-    path = state_dir() / "empty-mcp.json"
+    path = ensure_state_dir() / "empty-mcp.json"
     if not path.is_file():
-        path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(
             resources.files("agentplane").joinpath("templates/empty-mcp.json").read_text(), encoding="utf-8"
         )
@@ -388,8 +389,7 @@ def _create_log(provider: str) -> tuple[str, Path, int]:
     The id already carries a random suffix; O_EXCL makes a collision a retry instead of two runs
     silently sharing (and overwriting) one log.
     """
-    log_dir = state_dir() / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
+    log_dir = ensure_state_dir("logs")
     flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     for _ in range(5):
         run_id = new_run_id(provider)
@@ -601,14 +601,21 @@ def run_task(
         seconds = int(time.monotonic() - start)
         log.flush()
         log.seek(0)
-        log_text = log.read().decode("utf-8", errors="replace")
+        raw = log.read()
+        # The log is kept indefinitely; mask token shapes on disk too (fences stay: it is not a HANDOFF).
+        masked = mask_secrets_bytes(raw)
+        if masked != raw:
+            log.seek(0)
+            log.truncate()
+            log.write(masked)
+        log_text = masked.decode("utf-8", errors="replace")
     if trap.cancelled is not None:
         # A provider's own exit status 130/143 is an ordinary failure; only agentplane's trap
         # makes a run "cancelled", and a cancelled run is never classified or retried.
         exit_code, kind = trap.exit_code, None
         print(f"agentplane: cancelled by {signal.Signals(trap.cancelled).name}; provider stopped", file=sys.stderr)
     else:
-        if code == 0 and len(log_text.encode("utf-8")) < int(cfg.run.get("min_output_bytes", 200)):
+        if code == 0 and len(masked) < int(cfg.run.get("min_output_bytes", 200)):
             print(
                 f"agentplane: warning: exit 0 but output is shorter than min_output_bytes: {log_path}",
                 file=sys.stderr,
@@ -641,8 +648,9 @@ def run_task(
         self_report=reported,
         changed=changed,
         fallback_from=fallback_from,
-        task_head=task.strip().splitlines()[0][:120],
-        command=argv,
+        task_head=task_head(task),
+        # task_via = "arg" puts the whole preamble + task into argv; the ledger keeps a placeholder.
+        command=[arg.replace(full_task, "<task>") for arg in argv],
         read_only=route.read_only,
         depth=depth,
     )

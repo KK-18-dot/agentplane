@@ -22,7 +22,8 @@ built-in providers/targets ──┘
    provider CLI (claude | codex | cursor-agent | gemini | ollama | your own | mock)
                   │
                   ▼  handoff.py ─ self-report parse, failure classification, sanitize,
-                  │              HANDOFF.md (0600, O_NOFOLLOW), runs.jsonl
+                  │              HANDOFF.md (0600, O_NOFOLLOW), runs.jsonl (0600, one
+                  │              O_APPEND write per line), secret masks for the log
                   ▼
    evals.py ─ fixture → fresh git workdir → run → check.sh / case.toml → results.jsonl + report.md
    doctor.py ─ OK/WARN/NOTE over all of the above
@@ -47,11 +48,11 @@ built-in providers/targets ──┘
 
 | module | responsibility |
 |---|---|
-| `config.py` | layered TOML loading, schema validation, env allowlist |
-| `render.py` | policy → targets, marker, adopt, check |
+| `config.py` | layered TOML loading, schema validation, env allowlist, private state directory |
+| `render.py` | policy → targets, marker, adopt, check, `max_bytes` |
 | `routing.py` | role resolution, provider availability, `routes` rows |
 | `run.py` | boundaries, argv/env assembly, forbidden-flag check, execution, timeout, cancellation, git change detection, fallback |
-| `handoff.py` | preamble, self-report parsing, failure classification, HANDOFF.md, ledger |
+| `handoff.py` | preamble, self-report parsing, failure classification, secret masking, HANDOFF.md, ledger |
 | `evals.py` | suites, workdir seeding, checks, reports |
 | `doctor.py` | diagnostics with OK/WARN/NOTE semantics (reuses `run.py`'s forbidden-flag check) |
 | `guard.py` | generated-file guard and Claude Code hook adapter |

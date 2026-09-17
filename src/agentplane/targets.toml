@@ -3,6 +3,8 @@
 #   path        output path relative to the project root
 #   frontmatter text placed before the generated marker (Cursor rules need YAML frontmatter)
 #   appendix    default appendix file (relative to project root) appended after the policy
+#   max_bytes   optional: the harness stops reading past this size; `render --check` fails and
+#               `doctor` warns when the rendered file is larger (it is still written)
 # Packs and agentplane.toml can add targets or override these tables.
 
 [targets.claude]
@@ -14,6 +16,8 @@ appendix = ".agentplane/appendix/claude.md"
 description = "OpenAI Codex and any AGENTS.md-aware agent"
 path = "AGENTS.md"
 appendix = ".agentplane/appendix/codex.md"
+# Codex CLI reads at most project_doc_max_bytes of AGENTS.md (32768 in 0.153.4) and drops the rest.
+max_bytes = 32768
 
 [targets.cursor]
 description = "Cursor project rule"

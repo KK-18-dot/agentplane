@@ -76,6 +76,21 @@ def state_dir() -> Path:
     return Path(xdg) / "agentplane"
 
 
+def ensure_state_dir(*parts: str) -> Path:
+    """Create the state directory (or a subdirectory of it) with mode 0700 and return it.
+
+    Logs keep full provider output and the ledger keeps task heads, so both must be private.
+    The mode goes to mkdir rather than through the umask, because provider processes inherit
+    the umask. An existing directory is left alone; ``doctor`` reports one that is too open.
+    """
+    base = state_dir()
+    path = base.joinpath(*parts)
+    for directory in (base, path):
+        if not directory.is_dir():
+            os.makedirs(directory, mode=0o700, exist_ok=True)
+    return path
+
+
 def _read_toml(path: Path) -> dict[str, Any]:
     try:
         with path.open("rb") as fh:
@@ -297,6 +312,10 @@ def validate(cfg: Config) -> None:
                     f"[roles.{role}] effort {effort!r} is not supported by provider {provider} "
                     f"(allowed: {', '.join(allowed) or 'none'})"
                 )
+    for name, target in cfg.targets.items():
+        limit = target.get("max_bytes") if isinstance(target, dict) else None
+        if limit is not None and (isinstance(limit, bool) or not isinstance(limit, int) or limit < 1):
+            raise ConfigError(f"[targets.{name}] max_bytes must be a positive integer")
     for name in cfg.render_targets:
         if name not in cfg.targets:
             raise ConfigError(f"[render] targets: unknown target {name!r} (known: {', '.join(sorted(cfg.targets))})")
