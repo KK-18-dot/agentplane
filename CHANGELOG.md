@@ -12,8 +12,12 @@
 - The ledger no longer stores the full task for `task_via = "arg"` providers (cursor, gemini): `command` records `<task>` in its place, and `task_head` is masked like the HANDOFF. Ledger lines are appended with a single `os.write` on an `O_APPEND` descriptor.
 - State files were world-readable. The state directory, `logs/` and `evals/` are now created 0700, log files and `runs.jsonl` 0600, without touching the umask the provider inherits. `doctor` warns when an existing state directory or ledger is open to group/other and prints the `chmod` fix. Token shapes are masked in the log on disk after each run.
 
+- `eval report` now implements the documented rule: runs with status `quota-exhausted` or `auth-required` are excluded from pass rates and counted in a new `excluded (infrastructure)` column. `timeout` still counts as a failure, and `docs/evals.md` now says so.
+
 ### Added
 
+- `agentplane eval report RESULTS --baseline BASE --fail-on-regression` exits 1 when a case present in both files has a lower pass rate than the baseline, for CI.
+- Eval result rows carry `run_id`, the ledger id of the run.
 - `max_bytes` on render targets. The built-in `codex` target sets 32768, the size at which Codex CLI stops reading `AGENTS.md`. An oversized target is still written with a warning, fails `render --check` as `too-large`, and is a `doctor` WARN.
 
 ## 0.1.0 — 2026-09-13

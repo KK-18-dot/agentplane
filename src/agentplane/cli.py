@@ -324,7 +324,7 @@ def cmd_packs(args: argparse.Namespace) -> int:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
-    from .evals import load_results, render_report, run_suite
+    from .evals import load_results, regressions, render_report, run_suite
 
     if args.eval_cmd == "run":
         cfg = load_config(args.dir)
@@ -341,9 +341,16 @@ def cmd_eval(args: argparse.Namespace) -> int:
         _out(f"results: {results_path} ({passed}/{len(results)} passed); report: {results_path.parent / 'report.md'}")
         return 0 if passed == len(results) else 1
     if args.eval_cmd == "report":
+        if args.fail_on_regression and not args.baseline:
+            raise UsageError("--fail-on-regression needs --baseline")
         rows = load_results(Path(args.results))
         baseline = load_results(Path(args.baseline)) if args.baseline else None
         _out(render_report(rows, baseline).rstrip("\n"))
+        if args.fail_on_regression and baseline is not None:
+            found = regressions(rows, baseline)
+            for line in found:
+                _err(f"regression: {line}")
+            return 1 if found else 0
         return 0
     raise UsageError("eval needs a subcommand: run | report")
 
@@ -435,6 +442,11 @@ def build_parser() -> argparse.ArgumentParser:
     ep = es.add_parser("report", help="render a results.jsonl as markdown")
     ep.add_argument("results")
     ep.add_argument("--baseline", help="another results.jsonl to diff against")
+    ep.add_argument(
+        "--fail-on-regression",
+        action="store_true",
+        help="exit 1 when a case present in both files has a lower pass rate than the baseline",
+    )
     p.set_defaults(func=cmd_eval)
 
     p = sub.add_parser("guard", help="refuse edits to generated files (for harness hooks)")

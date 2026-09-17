@@ -13,6 +13,8 @@ A suite is a directory of cases. Each case directory contains:
 
 Every run appends one JSON line to results.jsonl; ``eval report`` renders a markdown table and,
 with ``--baseline``, signed pass-rate diffs so improvements and regressions surface together.
+Rows with an infrastructure status (quota-exhausted, auth-required) are excluded from pass rates
+and counted separately; ``--fail-on-regression`` turns a lower pass rate into exit 1 for CI.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from .routing import resolve_route
 from .run import run_task
 
 CASE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+INFRA_STATUSES = ("quota-exhausted", "auth-required")
 
 
 @dataclass
@@ -52,6 +55,7 @@ class CaseResult:
     reasons: list[str] = field(default_factory=list)
     workdir: str = ""
     ts: str = ""
+    run_id: str = ""  # the run's ledger id, to join a result row with runs.jsonl and its log
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -190,6 +194,7 @@ def run_suite(
                     reasons=reasons,
                     workdir=str(workdir),
                     ts=rec.ts,
+                    run_id=rec.id,
                 )
                 results.append(result)
                 fh.write(result.to_json() + "\n")
@@ -217,12 +222,41 @@ def load_results(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _pass_rates(rows: list[dict[str, Any]]) -> dict[str, tuple[int, int]]:
-    rates: dict[str, tuple[int, int]] = {}
+def is_infrastructure(row: dict[str, Any]) -> bool:
+    """A quota or login failure says nothing about the route's capability on the case."""
+    return row.get("status") in INFRA_STATUSES
+
+
+def _pass_rates(rows: list[dict[str, Any]]) -> dict[str, tuple[int, int, int]]:
+    """case -> (passed, counted, excluded). Timeouts stay counted: a route that is too slow
+    did not deliver."""
+    rates: dict[str, tuple[int, int, int]] = {}
     for row in rows:
-        passed, total = rates.get(row["case"], (0, 0))
-        rates[row["case"]] = (passed + (1 if row["passed"] else 0), total + 1)
+        passed, counted, excluded = rates.get(row["case"], (0, 0, 0))
+        if is_infrastructure(row):
+            rates[row["case"]] = (passed, counted, excluded + 1)
+        else:
+            rates[row["case"]] = (passed + (1 if row["passed"] else 0), counted + 1, excluded)
     return rates
+
+
+def _pct(passed: int, counted: int) -> str:
+    return f"{passed / counted * 100:.0f}%" if counted else "n/a"
+
+
+def regressions(rows: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> list[str]:
+    """Cases present in both runs whose pass rate went down (infrastructure rows excluded)."""
+    rates, base_rates = _pass_rates(rows), _pass_rates(baseline)
+    found = []
+    for case in sorted(set(rates) & set(base_rates)):
+        passed, counted, _ = rates[case]
+        bpassed, bcounted, _ = base_rates[case]
+        if counted and bcounted and passed * bcounted < bpassed * counted:
+            found.append(
+                f"{case}: {passed}/{counted} ({_pct(passed, counted)}) < baseline "
+                f"{bpassed}/{bcounted} ({_pct(bpassed, bcounted)})"
+            )
+    return found
 
 
 def render_report(results: list[CaseResult] | list[dict[str, Any]], baseline: list[dict[str, Any]] | None) -> str:
@@ -233,34 +267,39 @@ def render_report(results: list[CaseResult] | list[dict[str, Any]], baseline: li
     if rows:
         lines.append(f"suite: {rows[0]['suite']}  runs: {len(rows)}  cases: {len(rates)}")
         lines.append("")
-    header = "| case | route | pass | rate |" + (" baseline | diff |" if baseline else "")
+    header = "| case | route | pass | rate | excluded (infrastructure) |" + (" baseline | diff |" if baseline else "")
     lines.append(header)
-    lines.append("|---|---|---|---|" + ("---|---|" if baseline else ""))
-    total_pass = total_runs = 0
-    for case, (passed, total) in sorted(rates.items()):
+    lines.append("|---|---|---|---|---|" + ("---|---|" if baseline else ""))
+    total_pass = total_runs = total_excluded = 0
+    for case, (passed, counted, excluded) in sorted(rates.items()):
         total_pass += passed
-        total_runs += total
+        total_runs += counted
+        total_excluded += excluded
         route = next(
             (f"{r['provider']}/{r['model'] or '-'}/{r['effort'] or '-'}" for r in rows if r["case"] == case), "-"
         )
-        rate = passed / total * 100 if total else 0.0
-        line = f"| {case} | {route} | {passed}/{total} | {rate:.0f}% |"
+        line = f"| {case} | {route} | {passed}/{counted} | {_pct(passed, counted)} | {excluded} |"
         if baseline:
-            bp, bt = base_rates.get(case, (0, 0))
-            if bt:
-                brate = bp / bt * 100
-                line += f" {bp}/{bt} ({brate:.0f}%) | {rate - brate:+.0f}pt |"
-            else:
+            if case not in base_rates:
                 line += " - | new |"
+            else:
+                bpassed, bcounted, _ = base_rates[case]
+                line += f" {bpassed}/{bcounted} ({_pct(bpassed, bcounted)}) |"
+                if counted and bcounted:
+                    line += f" {(passed / counted - bpassed / bcounted) * 100:+.0f}pt |"
+                else:
+                    line += " n/a |"
         lines.append(line)
-    if total_runs:
+    if total_runs or total_excluded:
         lines.append("")
-        lines.append(f"overall: {total_pass}/{total_runs} ({total_pass / total_runs * 100:.0f}%)")
-    failures = [r for r in rows if not r["passed"]]
-    if failures:
-        lines.append("")
-        lines.append("## failures")
-        lines.append("")
-        for r in failures:
-            lines.append(f"- {r['case']} trial {r['trial']}: {'; '.join(r['reasons'])} (workdir: {r['workdir']})")
+        overall = f"overall: {total_pass}/{total_runs} ({_pct(total_pass, total_runs)})"
+        lines.append(overall + (f"; excluded (infrastructure): {total_excluded}" if total_excluded else ""))
+    for title, selected in (
+        ("failures", [r for r in rows if not r["passed"] and not is_infrastructure(r)]),
+        ("excluded (infrastructure)", [r for r in rows if is_infrastructure(r)]),
+    ):
+        if selected:
+            lines.extend(["", f"## {title}", ""])
+            for r in selected:
+                lines.append(f"- {r['case']} trial {r['trial']}: {'; '.join(r['reasons'])} (workdir: {r['workdir']})")
     return "\n".join(lines) + "\n"

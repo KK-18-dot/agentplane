@@ -8,6 +8,7 @@ from agentplane.config import load_config, state_dir
 from agentplane.doctor import run_doctor
 from agentplane.evals import load_results, render_report, run_suite
 from agentplane.guard import check_paths, claude_hook
+from agentplane.handoff import read_records
 from agentplane.render import render
 
 # ---- doctor -----------------------------------------------------------------------------------
@@ -156,6 +157,76 @@ def test_eval_suite_runs_grades_and_reports(project: Path, sandbox: Path) -> Non
     baseline = [dict(r, passed=True) for r in rows]
     diff = render_report(rows, baseline)
     assert "-100pt" in diff and "+0pt" in diff
+
+
+def _row(case: str, passed: bool, status: str = "done", trial: int = 1) -> dict:
+    return {
+        "suite": "s",
+        "case": case,
+        "trial": trial,
+        "role": "r",
+        "provider": "p",
+        "model": "m",
+        "effort": "e",
+        "exit": 0 if passed else 1,
+        "status": status,
+        "seconds": 1,
+        "passed": passed,
+        "reasons": [] if passed else [f"status {status}"],
+        "workdir": "/w",
+        "ts": "",
+    }
+
+
+def test_report_excludes_infrastructure_failures_but_counts_timeouts() -> None:
+    rows = [
+        _row("a", True),
+        _row("a", False, "quota-exhausted", 2),
+        _row("a", False, "auth-required", 3),
+        _row("b", True),
+        _row("b", False, "timeout", 2),
+    ]
+    report = render_report(rows, None)
+    assert "| case | route | pass | rate | excluded (infrastructure) |" in report
+    assert "| a | p/m/e | 1/1 | 100% | 2 |" in report
+    assert "| b | p/m/e | 1/2 | 50% | 0 |" in report
+    assert "overall: 2/3 (67%); excluded (infrastructure): 2" in report
+    failures = report.split("## failures")[1].split("## excluded")[0]
+    assert "b trial 2" in failures and "a trial 2" not in failures
+    assert "- a trial 2: status quota-exhausted" in report.split("## excluded (infrastructure)")[1]
+    only_infra = render_report([_row("c", False, "quota-exhausted")], [_row("c", True)])
+    assert "| c | p/m/e | 0/0 | n/a | 1 | 1/1 (100%) | n/a |" in only_infra
+
+
+def test_eval_report_fail_on_regression(sandbox: Path, capsys) -> None:
+    def write(name: str, rows: list[dict]) -> str:
+        path = sandbox / f"{name}.jsonl"
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        return str(path)
+
+    base = write("base", [_row("a", True), _row("a", True, trial=2), _row("b", False), _row("gone", True)])
+    same = write("same", [_row("a", True), _row("a", True, trial=2), _row("b", False), _row("new", False)])
+    better = write("better", [_row("a", True), _row("b", True)])
+    worse = write("worse", [_row("a", True), _row("a", False, trial=2), _row("b", False)])
+    infra = write("infra", [_row("a", True), _row("a", False, "quota-exhausted", 2), _row("b", False)])
+    for results in (same, better, infra):
+        assert main(["eval", "report", results, "--baseline", base, "--fail-on-regression"]) == 0, results
+    capsys.readouterr()
+    assert main(["eval", "report", worse, "--baseline", base, "--fail-on-regression"]) == 1
+    captured = capsys.readouterr()
+    assert "| a | p/m/e | 1/2 | 50% | 0 | 2/2 (100%) | -50pt |" in captured.out
+    assert "regression: a: 1/2 (50%) < baseline 2/2 (100%)" in captured.err
+    assert main(["eval", "report", worse, "--baseline", base]) == 0
+    assert main(["eval", "report", worse, "--fail-on-regression"]) == 2
+    assert "--fail-on-regression needs --baseline" in capsys.readouterr().err
+
+
+def test_eval_rows_carry_the_ledger_run_id(project: Path, sandbox: Path) -> None:
+    cfg = load_config(project)
+    results_path, results = run_suite(cfg, _suite(sandbox), role="dry", provider=None, trials=2, results_dir=None)
+    ledger_ids = [r["id"] for r in read_records()]
+    assert [r.run_id for r in results] == ledger_ids
+    assert [row["run_id"] for row in load_results(results_path)] == ledger_ids
 
 
 def test_bundled_smoke_suite_passes_offline(project: Path) -> None:
