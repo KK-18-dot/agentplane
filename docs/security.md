@@ -6,7 +6,7 @@ agentplane launches other people's CLIs with write access to a directory. This p
 
 | Boundary | Mechanism | Failure |
 |---|---|---|
-| No secrets reach the provider from your shell | providers run with an **allowlisted** environment (`HOME PATH USER LOGNAME SHELL TERM LANG LC_* COLORTERM NO_COLOR TMPDIR XDG_*`); `env_extra` names that look like secrets are refused | exit 3 |
+| No secrets reach the provider from your shell | providers run with an **allowlisted** environment (`HOME PATH USER LOGNAME SHELL TERM LANG LC_* COLORTERM NO_COLOR TMPDIR XDG_*`), plus `AGENTPLANE_DEPTH` and `AGENTPLANE_PARENT` (the run id), which agentplane sets itself; `env_extra` names that look like secrets are refused | exit 3 |
 | Write scope | `--dir` must exist and must not be `$HOME` or an ancestor; HANDOFF must be inside `--dir` and not a symlink; the directory identity is re-checked before writing | exit 3 |
 | No harness bypass | an argv element is refused when it starts with `--dangerously-`, is `--yolo`, `--force`, `-f` or `-y` (also as `--flag=value`), or when it or its part after `=` is `bypassPermissions`, `danger-full-access` or `yolo` (quotes stripped, any case). That covers `--permission-mode bypassPermissions`, `--sandbox=danger-full-access`, `-c sandbox_mode=danger-full-access` and `--approval-mode yolo`. The task text is never inspected. `doctor` runs the same check over every provider table, so a bad definition is a WARN before anyone runs it. Built-in providers use each CLI's read-only / workspace-write modes and an empty MCP config | exit 3 |
 | Read-only stays read-only | a fallback can only tighten read-only: a read-only run falls back read-only, and a fallback role that declares `read_only = true` keeps it | — |

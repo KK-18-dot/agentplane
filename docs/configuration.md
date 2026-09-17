@@ -165,3 +165,5 @@ See [packs.md](packs.md).
 | `AGENTPLANE_STATE_DIR` | where logs, `runs.jsonl`, and eval results go (default `$XDG_STATE_HOME/agentplane`); created with mode 0700 when missing |
 | `XDG_CONFIG_HOME` | location of the user config layer |
 | `AGENTPLANE_DEPTH` | set by agentplane for providers it launches; do not set by hand |
+| `AGENTPLANE_PARENT` | set by agentplane for providers it launches (the id of the launching run) and recorded as `parent` by a nested `agentplane run`. Scripts may set it to their own id (1-200 characters of `A-Z a-z 0-9 . _ : / @ + -`); other values are ignored with a warning. Not a secret |
+| `AGENTPLANE_MOCK_RESPONSE`, `AGENTPLANE_MOCK_EXIT`, `AGENTPLANE_MOCK_SLEEP` | override the mock provider (see above) |

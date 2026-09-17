@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import asdict
 from importlib import resources
 from pathlib import Path
 
@@ -150,6 +151,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         read_only=True if args.read_only else None,
     )
     task = _read_task(args)
+    if args.json and args.dry_run:
+        raise UsageError("--json cannot be combined with --dry-run")
     if args.dry_run:
         from .run import build_command
 
@@ -168,10 +171,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         route=route,
         target_dir=Path(args.dir or os.getcwd()),
         out=Path(args.out) if args.out else None,
-        echo=not args.quiet,
+        # With --json, stdout carries exactly one JSON object, so provider output is not echoed.
+        echo=not (args.quiet or args.json),
         allow_fallback=not args.no_fallback,
     )
-    _out(f"HANDOFF: {outcome.record.out} (exit={outcome.code}, status={outcome.status}, {outcome.record.seconds}s)")
+    if args.json:
+        _out(json.dumps(asdict(outcome.record)))
+    else:
+        _out(
+            f"HANDOFF: {outcome.record.out} (exit={outcome.code}, status={outcome.status}, {outcome.record.seconds}s)"
+        )
     return outcome.code
 
 
@@ -403,6 +412,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-fallback", action="store_true", help="never retry on the role's fallback")
     p.add_argument("--quiet", action="store_true", help="do not echo provider output")
     p.add_argument("--dry-run", action="store_true", help="print the resolved route and command, run nothing")
+    p.add_argument(
+        "--json", action="store_true", help="print the run's ledger record as one JSON object instead (implies --quiet)"
+    )
     p.set_defaults(func=cmd_run)
 
     p = sub.add_parser("routes", help="show what each role resolves to and whether its provider is available")

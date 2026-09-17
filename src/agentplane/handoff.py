@@ -123,6 +123,7 @@ class RunRecord:
     self_report: str = "-"
     changed: list[str] = field(default_factory=list)
     fallback_from: str | None = None
+    parent: str | None = None  # AGENTPLANE_PARENT of the caller: the outer run id, or a CI job id
     task_head: str = ""
     command: list[str] = field(default_factory=list)
     read_only: bool = False

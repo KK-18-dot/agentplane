@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -48,6 +49,8 @@ from .handoff import (
 from .routing import Route, provider_status, resolve_route
 
 DEPTH_VAR = "AGENTPLANE_DEPTH"
+PARENT_VAR = "AGENTPLANE_PARENT"
+PARENT_RE = re.compile(r"^[A-Za-z0-9._:/@+-]{1,200}$")
 FORBIDDEN_PREFIX = "--dangerously-"
 # -f / -y are the short forms of --force (Cursor) and --yolo (Gemini CLI).
 FORBIDDEN_FLAGS = {"--yolo", "--force", "-f", "-y"}
@@ -114,6 +117,25 @@ def check_depth(cfg: Config) -> int:
     if depth >= int(cfg.run.get("max_depth", 2)):
         raise SafetyError(f"{DEPTH_VAR}={depth}: delegation depth limit reached; split the task and run it directly")
     return depth
+
+
+def parent_from_env(*, warn: bool = True) -> str | None:
+    """The caller's lineage id from AGENTPLANE_PARENT, if it is a plain token.
+
+    It ends up in the ledger that other tools parse, so anything outside a conservative
+    character set is dropped rather than recorded.
+    """
+    raw = os.environ.get(PARENT_VAR)
+    if not raw:
+        return None
+    if PARENT_RE.fullmatch(raw):  # fullmatch: "$" alone would accept a trailing newline
+        return raw
+    if warn:
+        print(
+            f"agentplane: warning: ignoring {PARENT_VAR} (expected 1-200 characters of A-Z a-z 0-9 . _ : / @ + -)",
+            file=sys.stderr,
+        )
+    return None
 
 
 # ---- command assembly ----------------------------------------------------------------------------
@@ -213,10 +235,12 @@ def build_command(cfg: Config, route: Route, task: str, target: Path) -> tuple[l
     return argv, stdin_text
 
 
-def build_env(cfg: Config, route: Route, depth: int) -> dict[str, str]:
+def build_env(cfg: Config, route: Route, depth: int, run_id: str) -> dict[str, str]:
     names = cfg.env_allowlist() + list(cfg.providers[route.provider].get("env_extra", []) or [])
     env = {name: os.environ[name] for name in names if name in os.environ}
     env[DEPTH_VAR] = str(depth + 1)
+    # Not a secret: lets a nested `agentplane run` record which run launched it.
+    env[PARENT_VAR] = run_id
     return env
 
 
@@ -572,6 +596,7 @@ def run_task(
     target = check_dir(target_dir)
     out_path = check_out(out, target)
     depth = check_depth(cfg)
+    parent = parent_from_env(warn=fallback_from is None)  # warn once, not again on the retry
 
     status = provider_status(cfg, route.provider)
     if not status.available:
@@ -595,7 +620,7 @@ def run_task(
         if spec.get("kind", "cli") == "mock":
             code = _run_mock(cfg, route, task, target, log, echo)
         else:
-            env = build_env(cfg, route, depth)
+            env = build_env(cfg, route, depth, run_id)
             with trap:
                 code = _run_cli(argv, stdin_text, env, target, route.timeout, log, echo, trap)
         seconds = int(time.monotonic() - start)
@@ -648,6 +673,7 @@ def run_task(
         self_report=reported,
         changed=changed,
         fallback_from=fallback_from,
+        parent=parent,
         task_head=task_head(task),
         # task_via = "arg" puts the whole preamble + task into argv; the ledger keeps a placeholder.
         command=[arg.replace(full_task, "<task>") for arg in argv],

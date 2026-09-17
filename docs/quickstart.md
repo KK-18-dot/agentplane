@@ -76,6 +76,8 @@ agentplane runs
 agentplane status
 ```
 
+From a script, `agentplane run --json ...` prints the run's ledger record as one JSON object instead (see [handoff.md](handoff.md)).
+
 ## 6. Diagnose
 
 ```bash

@@ -261,6 +261,20 @@ def test_cli_end_to_end(project: Path, capsys) -> None:
     assert main([]) == 2
 
 
+def test_cli_run_json_prints_exactly_one_record(project: Path, capsys, monkeypatch) -> None:
+    capsys.readouterr()
+    assert main(["run", "--role", "dry", "--dir", str(project), "--json", "hello"]) == 0
+    out = capsys.readouterr().out
+    record = json.loads(out)  # nothing else on stdout: no provider echo, no HANDOFF line
+    assert record["status"] == "done" and record["exit"] == 0 and record["parent"] is None
+    assert record["id"] == read_records()[-1]["id"]
+    monkeypatch.setenv("AGENTPLANE_MOCK_EXIT", "9")
+    assert main(["run", "--role", "dry", "--dir", str(project), "--json", "fail please"]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "failed"
+    assert main(["run", "--role", "dry", "--dir", str(project), "--json", "--dry-run", "x"]) == 2
+    assert "--json cannot be combined with --dry-run" in capsys.readouterr().err
+
+
 def test_cli_init_creates_files_and_doctor_is_clean(sandbox: Path, capsys) -> None:
     proj = sandbox / "work" / "fresh"
     proj.mkdir(parents=True)

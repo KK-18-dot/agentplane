@@ -16,6 +16,9 @@
 
 ### Added
 
+- Run lineage: the ledger has a `parent` field, taken from `AGENTPLANE_PARENT` when it is a plain token (otherwise ignored with a warning). agentplane sets `AGENTPLANE_PARENT` to the current run id for every provider it launches, so nested delegation is traceable from the ledger, and scripts or CI can set it to their own id.
+- `agentplane run --json` prints the final ledger record as one JSON object on stdout (no provider echo, no `HANDOFF:` line).
+- `docs/handoff.md` documents the ledger fields as a stable interface and the `status` values as a closed vocabulary.
 - `agentplane eval report RESULTS --baseline BASE --fail-on-regression` exits 1 when a case present in both files has a lower pass rate than the baseline, for CI.
 - Eval result rows carry `run_id`, the ledger id of the run.
 - `max_bytes` on render targets. The built-in `codex` target sets 32768, the size at which Codex CLI stops reading `AGENTS.md`. An oversized target is still written with a warning, fails `render --check` as `too-large`, and is a `doctor` WARN.

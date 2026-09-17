@@ -27,7 +27,13 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("XDG_STATE_HOME", str(home / ".local" / "state"))
     monkeypatch.setenv("AGENTPLANE_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("PATH", f"{fakebin}:{SYSTEM_PATH}")
-    for var in ("AGENTPLANE_DEPTH", "AGENTPLANE_MOCK_RESPONSE", "AGENTPLANE_MOCK_EXIT", "AGENTPLANE_MOCK_SLEEP"):
+    for var in (
+        "AGENTPLANE_DEPTH",
+        "AGENTPLANE_PARENT",
+        "AGENTPLANE_MOCK_RESPONSE",
+        "AGENTPLANE_MOCK_EXIT",
+        "AGENTPLANE_MOCK_SLEEP",
+    ):
         monkeypatch.delenv(var, raising=False)
     # Path.home() reads HOME on POSIX; make sure nothing cached the real one.
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))

@@ -19,7 +19,7 @@ Providers run in their own session, so Ctrl-C in a terminal reaches agentplane, 
 
 ## Status vocabulary
 
-`status` in the HANDOFF and ledger is derived by agentplane, never copied from prose:
+`status` in the HANDOFF and ledger is derived by agentplane, never copied from prose. The vocabulary is closed: a run's `status` is always one of the values below, and a new value is added only with a CHANGELOG entry, so tools may match on it exhaustively.
 
 | status | from |
 |---|---|
@@ -99,13 +99,46 @@ The file is written with mode 0600 through a directory file descriptor with `O_N
  "log":"/home/u/.local/state/agentplane/logs/20260913101500-codex-4242-9f3a1c.log","exit":0,
  "status":"done-with-concerns","seconds":212,"self_report":"DONE_WITH_CONCERNS",
  "changed":[" M src/orders.py","?? tests/test_orders_validation.py"],"fallback_from":null,
+ "parent":"20260913101230-claude-4100-0b7e22",
  "task_head":"Add input validation to the /orders endpoint","command":["codex","exec","..."],
- "read_only":false,"depth":0}
+ "read_only":false,"depth":1}
 ```
 
-`agentplane runs --json` dumps it; any tool can aggregate it.
+The fields below are the stable interface. Scripts may rely on them; a field is removed or changes meaning only in a release that says so in the CHANGELOG, and new fields may be added.
 
-The ledger and the logs are created with mode 0600 inside a 0700 state directory. Each line is appended with one `write` call, so concurrent runs do not interleave. `command` is the argv agentplane built, with the preamble + task replaced by `<task>` when the provider takes the task as an argument; `task_head` is the first line of the task with token shapes masked, cut to 120 characters. The log keeps the full provider output with the same token shapes masked.
+| field | type | meaning |
+|---|---|---|
+| `id` | string | run id, `YYYYmmddHHMMSS-<provider>-<pid>-<6 hex>`; unique per run; the log is `<id>.log` |
+| `ts` | string | local time the run finished, `%Y-%m-%dT%H:%M:%S%z` |
+| `provider` / `role` | string / string or null | the provider that ran and the role it was resolved from (`null` for `--provider`) |
+| `model` / `effort` | string or null | the values agentplane passed (`null`: the CLI's own default) |
+| `dir` / `out` / `log` | string | absolute working directory, HANDOFF path, log path |
+| `exit` | integer | the exit code, as in the table above |
+| `status` | string | one value of the closed vocabulary above |
+| `seconds` | integer | wall-clock duration of the provider process |
+| `self_report` | string | the provider's `AGENTPLANE-STATUS` value, or `-` for none |
+| `changed` | list of strings | the lines described under "What `changed` contains" |
+| `fallback_from` | string or null | on a fallback run: `<role or provider>/<failure kind>/<log of the failed run>` |
+| `parent` | string or null | the caller's lineage id from `AGENTPLANE_PARENT` (see below) |
+| `task_head` | string | first line of the task, token shapes masked, at most 120 characters |
+| `command` | list of strings | the argv agentplane built, with the task replaced by `<task>`; `["<mock>"]` for the mock provider |
+| `read_only` | boolean | whether the run was read-only |
+| `depth` | integer | delegation depth of this run (0 when started by a person or a script) |
+
+`agentplane runs --json` dumps the ledger; any tool can aggregate it.
+
+The ledger and the logs are created with mode 0600 inside a 0700 state directory. Each line is appended with one `write` call, so concurrent runs do not interleave. The log keeps the full provider output with token shapes masked.
+
+## Lineage and scripting
+
+Every provider agentplane launches gets `AGENTPLANE_PARENT=<id of this run>` next to `AGENTPLANE_DEPTH`. When that provider delegates again with `agentplane run`, the nested run records the outer id in `parent`, so a delegation chain can be reconstructed from the ledger alone. A script or CI job can set `AGENTPLANE_PARENT` itself (for example to a pipeline id) to join its runs with its own records. The value must be 1 to 200 characters from `A-Z a-z 0-9 . _ : / @ + -`; anything else is ignored with a warning on stderr and `parent` stays `null`. The variable is not a secret.
+
+`agentplane run --json` prints the final ledger record as a single JSON object on stdout instead of the `HANDOFF:` line, and does not echo provider output (as with `--quiet`). Warnings go to stderr. The exit code is unchanged. When no run was recorded (exit 2 or 3, or exit 1 with `cannot start provider`), stdout is empty and stderr has the reason. With a fallback, the printed record is the fallback run's; the failed run is in the ledger, and its log path is in `fallback_from`.
+
+```bash
+record="$(agentplane run --role impl --json --task-file PLAN.md)"; code=$?
+echo "$record" | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["status"], r["id"])'
+```
 
 ## Accepting a result
 

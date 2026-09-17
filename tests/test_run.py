@@ -526,6 +526,55 @@ def test_secrets_are_masked_in_the_log_kept_on_disk(project: Path, fake_cli) -> 
     assert b"bad \xff byte" in log  # bytes that are not UTF-8 survive the rewrite
 
 
+# ---- lineage -----------------------------------------------------------------------------------
+
+
+def test_parent_comes_from_the_environment_and_the_provider_gets_this_run_id(
+    project: Path, fake_cli, sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_cli()
+    monkeypatch.setenv("AGENTPLANE_PARENT", "ci:pipeline/42@main+retry-1")
+    record = _run(project, "shim").record
+    assert record.parent == "ci:pipeline/42@main+retry-1"
+    assert read_records()[0]["parent"] == "ci:pipeline/42@main+retry-1"
+    env = (sandbox / "fakecli.env").read_text().splitlines()
+    assert f"AGENTPLANE_PARENT={record.id}" in env
+    assert "AGENTPLANE_DEPTH=1" in env
+
+
+@pytest.mark.parametrize("value", ["has spaces", "x" * 201, "semi;colon", "new\nline", "trailing\n", "$(id)"])
+def test_an_invalid_parent_is_ignored_with_a_warning(
+    project: Path, monkeypatch: pytest.MonkeyPatch, capsys, value: str
+) -> None:
+    monkeypatch.setenv("AGENTPLANE_PARENT", value)
+    record = _run(project, "dry").record
+    assert record.parent is None
+    assert "ignoring AGENTPLANE_PARENT" in capsys.readouterr().err
+
+
+def test_parent_is_null_without_the_variable(project: Path) -> None:
+    assert _run(project, "dry").record.parent is None
+    assert read_records()[0]["parent"] is None
+
+
+def test_a_nested_run_records_the_outer_run_as_parent(project: Path, fake_cli, sandbox: Path) -> None:
+    nested = sandbox / "nested.json"
+    fake_cli(
+        script=f"mkdir -p sub && {sys.executable} -m agentplane run --provider mock --dir sub --json "
+        f"'nested task' > {nested}; echo ok; echo 'AGENTPLANE-STATUS: DONE'"
+    )
+    outer = _run(project, "shim").record
+    inner = json.loads(nested.read_text())
+    assert inner["parent"] == outer.id
+    assert inner["depth"] == 1 and inner["status"] == "done"
+
+
+LEDGER_FIELDS = {
+    "id", "ts", "provider", "role", "model", "effort", "dir", "out", "log", "exit", "status", "seconds",
+    "self_report", "changed", "fallback_from", "parent", "task_head", "command", "read_only", "depth",
+}  # fmt: skip
+
+
 def test_ledger_is_valid_jsonl(project: Path) -> None:
     _run(project, "dry")
     _run(project, "dry")
@@ -533,4 +582,4 @@ def test_ledger_is_valid_jsonl(project: Path) -> None:
     assert len(lines) == 2
     for line in lines:
         row = json.loads(line)
-        assert {"id", "ts", "provider", "exit", "status", "log", "out", "changed"} <= set(row)
+        assert set(row) == LEDGER_FIELDS  # the documented, stable schema (docs/handoff.md)
