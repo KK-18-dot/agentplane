@@ -811,6 +811,14 @@ def test_a_task_that_is_not_utf8_is_refused_before_launch(project: Path, fake_cl
     assert read_records() == []
 
 
+def test_a_task_with_a_nul_byte_is_refused_before_launch(project: Path, fake_cli, sandbox: Path) -> None:
+    fake_cli()
+    with pytest.raises(UsageError, match="NUL"):
+        _run(project, "shim", task="fix\0bug")
+    assert not (sandbox / "fakecli.argv").exists()
+    assert read_records() == []
+
+
 def test_a_task_file_that_is_not_utf8_is_a_usage_error(project: Path, sandbox: Path) -> None:
     bad = sandbox / "task.txt"
     bad.write_bytes(b"fix caf\xe9 bug")

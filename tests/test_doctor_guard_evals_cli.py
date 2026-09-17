@@ -277,7 +277,7 @@ def test_eval_report_fail_on_regression(sandbox: Path, capsys) -> None:
     better = write("better", [_row("a", True), _row("b", True), gone])
     worse = write("worse", [_row("a", True), _row("a", False, trial=2), _row("b", False), gone])
     infra = write("infra", [_row("a", True), _row("a", False, "quota-exhausted", 2), _row("b", False), gone])
-    for results in (same, better, infra):
+    for results in (same, better):
         assert gate(results, base)[0] == 0, results
     code, err = gate(worse, base)
     assert code == 1 and "regression: a: 1/2 (50%) < baseline 2/2 (100%)" in err
@@ -292,7 +292,10 @@ def test_eval_report_fail_on_regression(sandbox: Path, capsys) -> None:
     assert code == 1 and "incomplete: gone (in the baseline, missing from these results)" in err
     all_infra = write("all-infra", [_row("a", False, "auth-required"), _row("b", False), gone])
     code, err = gate(all_infra, base)
-    assert code == 1 and "incomplete: a (every run excluded: quota, login or cancelled)" in err
+    assert code == 1 and "incomplete: a trial 1 was excluded (auth-required)" in err
+    # one excluded trial is enough: a failure whose output mentions a quota word must not hide a regression
+    code, err = gate(infra, base)
+    assert code == 1 and "incomplete: a trial 2 was excluded (quota-exhausted)" in err
     cancelled = write("cancelled", [_row("a", True), _row("a", False, "cancelled", 2), _row("b", False), gone])
     code, err = gate(cancelled, base)
     assert code == 1 and "incomplete: a trial 2 was cancelled" in err

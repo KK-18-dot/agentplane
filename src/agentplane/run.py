@@ -514,6 +514,8 @@ def run_task(
     except UnicodeEncodeError as exc:
         # Bytes that are not UTF-8 reach Python as surrogates; nothing downstream can write them.
         raise UsageError(f"task is not valid UTF-8 (at character {exc.start}); convert it to UTF-8 and rerun") from exc
+    if "\0" in task:
+        raise UsageError("task contains a NUL byte, which cannot be passed to a provider")
     target = check_dir(target_dir)
     out_path = check_out(out, target)
     depth = check_depth(cfg)

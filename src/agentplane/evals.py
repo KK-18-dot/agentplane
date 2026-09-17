@@ -276,16 +276,19 @@ def regressions(rows: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> l
 def incomplete(rows: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> list[str]:
     """Why these results cannot pass the regression gate even without a lower pass rate.
 
-    A suite that was stopped, a case that dropped out, or a case whose every run was excluded shows
-    nothing about the baseline's cases. Excluding them silently would let an interrupted run (or a
-    provider that signals its own evaluator) pass the gate.
+    Any excluded trial counts: the gate cannot tell an outage from a failure whose output happens to
+    contain a quota or login word (the markers are plain substrings), or from a provider that
+    signals its own evaluator. A stopped suite or a dropped case shows nothing about the baseline's
+    cases either. Excluded rows still stay out of the pass rates in the report.
     """
     rates, base_rates = _pass_rates(rows), _pass_rates(baseline)
-    notes = [f"{r['case']} trial {r['trial']} was cancelled" for r in rows if r.get("status") == "cancelled"]
+    notes = []
+    for r in rows:
+        if r.get("status") == "cancelled":
+            notes.append(f"{r['case']} trial {r['trial']} was cancelled")
+        elif is_excluded(r):
+            notes.append(f"{r['case']} trial {r['trial']} was excluded ({r['status']})")
     notes += [f"{case} (in the baseline, missing from these results)" for case in sorted(set(base_rates) - set(rates))]
-    for case in sorted(set(rates) & set(base_rates)):
-        if not rates[case][1] and base_rates[case][1]:
-            notes.append(f"{case} (every run excluded: quota, login or cancelled)")
     return notes
 
 
