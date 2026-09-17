@@ -34,6 +34,10 @@ Findings from a review of the changes above, fixed before release:
 - Eval result rows carry `run_id`, the ledger id of the run.
 - `max_bytes` on render targets. The built-in `codex` target sets 32768, the size at which Codex CLI stops reading `AGENTS.md`. An oversized target is still written with a warning, fails `render --check` as `too-large`, and is a `doctor` WARN.
 
+### Internal
+
+- The git snapshot and the hardened git helper moved from `agentplane.run` to `agentplane.gitstate`. The Python modules are not a stable interface; the CLI, HANDOFF and ledger are.
+
 ## 0.1.0 — 2026-09-13
 
 First public release, available on PyPI (`pipx install agentplane`).

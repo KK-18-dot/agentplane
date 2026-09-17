@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from agentplane import gitstate as git_mod
 from agentplane import handoff as handoff_mod
 from agentplane import run as run_mod
 from agentplane.config import load_config, state_dir
@@ -145,7 +146,7 @@ def test_changed_sees_a_retargeted_symlink(project: Path, fake_cli) -> None:
 
 
 def test_changed_skips_content_hashes_above_the_limit(project: Path, fake_cli, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(run_mod, "HASH_LIMIT", 2)
+    monkeypatch.setattr(git_mod, "HASH_LIMIT", 2)
     (project / "big.txt").write_text("x\n")
     fake_cli(script="echo more >> big.txt; echo new > fresh.txt; echo ok; echo 'AGENTPLANE-STATUS: DONE'")
     changed = _run(project, "shim").record.changed
@@ -590,8 +591,8 @@ def test_git_snapshot_runs_with_the_allowlisted_environment(project: Path, monke
             seen.append({"cmd": cmd, "env": kwargs.get("env")})
         return real_run(cmd, *args, **kwargs)
 
-    monkeypatch.setattr(run_mod.subprocess, "run", spy)
-    run_mod.git_state(project)
+    monkeypatch.setattr(git_mod.subprocess, "run", spy)
+    git_mod.git_state(project)
     assert seen
     for call in seen:
         assert call["env"] is not None and "MY_API_TOKEN" not in call["env"], call["cmd"]
@@ -622,7 +623,7 @@ def test_hostile_file_names_cannot_forge_handoff_sections(project: Path, fake_cl
     ],
 )
 def test_paths_are_quoted_like_git_when_they_could_break_a_line(raw: str, shown: str) -> None:
-    assert run_mod._display(raw) == shown
+    assert git_mod._display(raw) == shown
 
 
 def test_a_carriage_return_in_a_file_name_is_hashed_as_itself(project: Path, fake_cli) -> None:
@@ -636,7 +637,7 @@ def test_a_carriage_return_in_a_file_name_is_hashed_as_itself(project: Path, fak
 
 def test_snapshot_failures_never_lose_the_run_record(project: Path, fake_cli, monkeypatch: pytest.MonkeyPatch) -> None:
     fake_cli(script="echo new > n.txt; echo 'created n.txt as asked'; echo 'AGENTPLANE-STATUS: DONE'")
-    real = run_mod._fingerprints
+    real = git_mod._fingerprints
     calls = {"n": 0}
 
     def flaky(*args, **kwargs):
@@ -645,7 +646,7 @@ def test_snapshot_failures_never_lose_the_run_record(project: Path, fake_cli, mo
             raise subprocess.TimeoutExpired("git hash-object", 300)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(run_mod, "_fingerprints", flaky)
+    monkeypatch.setattr(git_mod, "_fingerprints", flaky)
     outcome = _run(project, "shim")
     assert outcome.code == 0 and calls["n"] == 2
     assert outcome.record.changed[0].startswith("(changes could not be detected")
@@ -656,9 +657,11 @@ def test_snapshot_failures_never_lose_the_run_record(project: Path, fake_cli, mo
 def test_large_and_special_files_are_fingerprinted_without_reading_them(
     project: Path, fake_cli, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(run_mod, "HASH_MAX_BYTES", 10, raising=False)
+    monkeypatch.setattr(git_mod, "HASH_MAX_BYTES", 10)
     (project / "big.bin").write_bytes(b"x" * 100)
     os.mkfifo(project / "fifo")
+    snapshot = git_mod.git_state(project)
+    assert snapshot is not None and snapshot.entries["big.bin"][1].startswith("stat:100:")
     fake_cli(script="printf 'y' >> big.bin; echo ok; echo 'AGENTPLANE-STATUS: DONE'")
     changed = _run(project, "shim").record.changed
     assert "?? big.bin (modified before the run and again during it)" in changed

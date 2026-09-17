@@ -16,8 +16,9 @@ built-in providers/targets ──┘
                   ▼  routing.py ─ role → provider/model/effort/timeout/read-only/fallback
                   │
                   ▼  run.py ─ boundary checks, argv from provider template, forbidden-flag check,
-                  │           env allowlist, timeout / cancel + process group kill,
-                  │           git snapshot (HEAD + content hashes) before/after
+                  │           env allowlist, timeout / cancel + process group kill
+                  │  gitstate.py ─ snapshot before/after (HEAD + content hashes + git metadata),
+                  │                git run with no hooks, fsmonitor, pager or filter drivers
                   ▼
    provider CLI (claude | codex | cursor-agent | gemini | ollama | your own | mock)
                   │
@@ -51,10 +52,11 @@ built-in providers/targets ──┘
 | `config.py` | layered TOML loading, schema validation, env allowlist, private state directory |
 | `render.py` | policy → targets, marker, adopt, check, `max_bytes` |
 | `routing.py` | role resolution, provider availability, `routes` rows |
-| `run.py` | boundaries, argv/env assembly, forbidden-flag check, execution, timeout, cancellation, git change detection, fallback |
+| `run.py` | boundaries, argv/env assembly, forbidden-flag check, execution, timeout, cancellation, fallback |
+| `gitstate.py` | hardened git calls (`safe_git`), before/after snapshots, the `changed` lines |
 | `handoff.py` | preamble, self-report parsing, failure classification, secret masking, HANDOFF.md, ledger |
 | `evals.py` | suites, workdir seeding, checks, reports |
-| `doctor.py` | diagnostics with OK/WARN/NOTE semantics (reuses `run.py`'s forbidden-flag check) |
+| `doctor.py` | diagnostics with OK/WARN/NOTE semantics (reuses `run.py`'s forbidden-flag check and `gitstate.py`'s git helper) |
 | `guard.py` | generated-file guard and Claude Code hook adapter |
 | `cli.py` | argparse front end |
 | `providers/*.toml`, `targets.toml`, `templates/` | package data |

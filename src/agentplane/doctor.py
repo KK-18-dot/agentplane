@@ -17,10 +17,11 @@ from pathlib import Path
 
 from .config import Config, ensure_state_dir, load_config, state_dir
 from .errors import AgentplaneError
+from .gitstate import safe_git
 from .handoff import ledger_path
 from .render import is_generated, render
 from .routing import all_provider_status, explain_routes
-from .run import forbidden_in_definition, safe_git
+from .run import forbidden_in_definition
 
 SECRET_NAME_GLOBS = [
     ".env",

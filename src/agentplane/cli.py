@@ -256,7 +256,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     _out("")
     _out("## git")
     if shutil.which("git"):
-        from .run import UnsafeRepository, filter_overrides, safe_git
+        from .gitstate import UnsafeRepository, filter_overrides, safe_git
 
         # The project may be a --dir a provider wrote to: git must not run anything planted in it.
         try:
