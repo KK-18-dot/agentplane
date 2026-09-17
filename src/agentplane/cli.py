@@ -128,12 +128,14 @@ def cmd_render(args: argparse.Namespace) -> int:
 
 
 def _read_task(args: argparse.Namespace) -> str:
+    # Bytes that are not UTF-8 are kept as surrogates (as argv already is) so run_task refuses all
+    # three sources the same way, with exit 2, instead of a traceback here.
     if args.task_file:
-        return Path(args.task_file).read_text(encoding="utf-8")
+        return Path(args.task_file).read_bytes().decode("utf-8", "surrogateescape")
     if args.task:
         return " ".join(args.task)
     if not sys.stdin.isatty():
-        return sys.stdin.read()
+        return sys.stdin.buffer.read().decode("utf-8", "surrogateescape")
     return ""
 
 
@@ -341,7 +343,7 @@ def cmd_packs(args: argparse.Namespace) -> int:
 
 
 def cmd_eval(args: argparse.Namespace) -> int:
-    from .evals import load_results, regressions, render_report, run_suite, uncompared
+    from .evals import incomplete, load_results, regressions, render_report, run_suite, uncompared
 
     if args.eval_cmd == "run":
         cfg = load_config(args.dir)
@@ -365,11 +367,14 @@ def cmd_eval(args: argparse.Namespace) -> int:
         _out(render_report(rows, baseline).rstrip("\n"))
         if args.fail_on_regression and baseline is not None:
             found = regressions(rows, baseline)
+            gaps = incomplete(rows, baseline)
             for line in found:
                 _err(f"regression: {line}")
+            for line in gaps:
+                _err(f"incomplete: {line}")
             for line in uncompared(rows, baseline):
                 _err(f"not compared: {line}")
-            return 1 if found else 0
+            return 1 if found or gaps else 0
         return 0
     raise UsageError("eval needs a subcommand: run | report")
 

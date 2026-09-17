@@ -190,7 +190,8 @@ def _open_dir_under(root: Path, parent: Path) -> int:
     intermediate directory of a nested --out with a symlink could otherwise move the HANDOFF
     outside --dir after the path was validated.
     """
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    # O_NONBLOCK: a component swapped for a FIFO must fail, not block (harmless for directories).
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     rel = parent.relative_to(root)  # ValueError when outside
     fd = os.open(str(root), flags)
     try:

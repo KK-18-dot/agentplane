@@ -61,7 +61,7 @@ In CI, let the comparison decide:
 agentplane eval report results/new/results.jsonl --baseline results/base/results.jsonl --fail-on-regression
 ```
 
-`--fail-on-regression` prints the report as usual and exits 1 when any case present in both files has a lower pass rate than in the baseline (each regression is also printed on stderr). Cases that exist in only one file, or whose runs were all excluded on either side, are not compared and do not fail the gate; the ones missing from the new results or fully excluded are named on stderr as `not compared: …`, so a case that silently dropped out of a suite is still visible in the CI log. It requires `--baseline` (exit 2 otherwise).
+`--fail-on-regression` prints the report as usual and exits 1 when any case present in both files has a lower pass rate than in the baseline (each regression is also printed on stderr). It also exits 1 when the new results cannot speak for the baseline, and names why on stderr as `incomplete: …`: a trial was cancelled, a baseline case is missing, or every run of a baseline case was excluded. Otherwise an interrupted suite, or a provider that signals its own evaluator, would pass by leaving cases out. New cases that the baseline does not have are reported but not compared, and a case whose every baseline run was excluded is named as `not compared: …` without failing. It requires `--baseline` (exit 2 otherwise).
 
 ## Design rules
 

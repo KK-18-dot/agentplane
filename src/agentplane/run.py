@@ -73,9 +73,14 @@ class RunOutcome:
     code: int
     status: str
     record: RunRecord
-    # A cancel signal that arrived after the status was decided, while the record was written.
-    # The record stands; callers that loop (eval) stop instead of starting the next run.
-    late_signal: int | None = None
+    # The signal that cancelled the run, or one that arrived while its record was written. The
+    # record stands either way; callers that loop (eval) stop instead of starting the next run.
+    stop_signal: int | None = None
+
+
+def cancel_exit_code(signum: int | None) -> int:
+    """130 for SIGINT, 143 for SIGTERM and SIGHUP (the documented exit codes)."""
+    return EXIT_CANCELLED_INT if signum == signal.SIGINT else EXIT_CANCELLED_TERM
 
 
 # ---- boundary checks ---------------------------------------------------------------------------
@@ -362,7 +367,7 @@ class CancelTrap:
 
     @property
     def exit_code(self) -> int:
-        return EXIT_CANCELLED_INT if self.received == signal.SIGINT else EXIT_CANCELLED_TERM
+        return cancel_exit_code(self.received)
 
     def sleep(self, seconds: float) -> bool:
         """Sleep in short steps; False as soon as a cancel signal has arrived."""
@@ -429,9 +434,14 @@ def _run_cli(
         assert proc.stdin is not None and stdin_text is not None
         try:
             proc.stdin.write(stdin_text.encode("utf-8"))
-            proc.stdin.close()
         except (BrokenPipeError, OSError, ValueError):
             pass
+        finally:
+            # Always close: a provider waiting for EOF would otherwise run until the timeout.
+            try:
+                proc.stdin.close()
+            except (BrokenPipeError, OSError, ValueError):
+                pass
 
     reader = threading.Thread(target=pump, daemon=True)
     reader.start()
@@ -499,6 +509,11 @@ def run_task(
 ) -> RunOutcome:
     if not task.strip():
         raise UsageError("task is empty (pass it as an argument, --task-file, or on stdin)")
+    try:
+        task.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        # Bytes that are not UTF-8 reach Python as surrogates; nothing downstream can write them.
+        raise UsageError(f"task is not valid UTF-8 (at character {exc.start}); convert it to UTF-8 and rerun") from exc
     target = check_dir(target_dir)
     out_path = check_out(out, target)
     depth = check_depth(cfg)
@@ -591,8 +606,11 @@ def run_task(
     if kind in ("quota-exhausted", "auth-required") and allow_fallback and route.fallback and fallback_from is None:
         with CancelTrap() as late:
             append_record(record)
+            if late.received is not None:
+                # No fallback after a signal: this run is the result, so the HANDOFF must describe it.
+                _write_result(record, task, log_text, next_note)
         if late.received is not None:
-            return RunOutcome(record.exit, record.status, record, late_signal=late.received)
+            return RunOutcome(record.exit, record.status, record, stop_signal=late.received)
         print(
             f"agentplane: {route.provider} reported {kind}; retrying once via fallback role {route.fallback}",
             file=sys.stderr,
@@ -618,16 +636,22 @@ def run_task(
 
     # The status is decided; a signal now must not kill the process between HANDOFF and ledger.
     with CancelTrap() as late:
-        try:
-            write_handoff(record, task, log_text, next_note)
-        except AgentplaneError as exc:
-            print(f"agentplane: {exc}", file=sys.stderr)
-            record.exit = 1
-            record.status = "handoff-write-failed"
+        _write_result(record, task, log_text, next_note)
         append_record(record)
     if late.received is not None:
         print(
             f"agentplane: {signal.Signals(late.received).name} arrived after the run finished; the record is complete",
             file=sys.stderr,
         )
-    return RunOutcome(record.exit, record.status, record, late_signal=late.received)
+    return RunOutcome(record.exit, record.status, record, stop_signal=cancelled or late.received)
+
+
+def _write_result(record: RunRecord, task: str, log_text: str, next_note: str) -> None:
+    """Write the HANDOFF; any failure turns the run into ``handoff-write-failed`` so the ledger row
+    that follows still records it."""
+    try:
+        write_handoff(record, task, log_text, next_note)
+    except Exception as exc:  # the row must be written whatever went wrong here
+        print(f"agentplane: cannot write HANDOFF: {exc}", file=sys.stderr)
+        record.exit = 1
+        record.status = "handoff-write-failed"

@@ -798,9 +798,59 @@ def test_a_signal_while_the_record_is_written_does_not_lose_it(project: Path, mo
 
     monkeypatch.setattr(run_mod, "write_handoff", interrupted)
     outcome = _run(project, "dry")
-    assert outcome.status == "done" and outcome.late_signal == signal.SIGINT
+    assert outcome.status == "done" and outcome.stop_signal == signal.SIGINT
     assert (project / "HANDOFF.md").is_file()
     assert [r["status"] for r in read_records()] == ["done"]
+
+
+def test_a_task_that_is_not_utf8_is_refused_before_launch(project: Path, fake_cli, sandbox: Path) -> None:
+    fake_cli()
+    with pytest.raises(UsageError, match="not valid UTF-8"):
+        _run(project, "shim", task="fix caf\udce9 bug")
+    assert not (sandbox / "fakecli.argv").exists()
+    assert read_records() == []
+
+
+def test_a_task_file_that_is_not_utf8_is_a_usage_error(project: Path, sandbox: Path) -> None:
+    bad = sandbox / "task.txt"
+    bad.write_bytes(b"fix caf\xe9 bug")
+    cli = [sys.executable, "-m", "agentplane", "run", "--role", "dry", "--dir", str(project), "--quiet"]
+    proc = subprocess.run([*cli, "--task-file", str(bad)], capture_output=True, text=True)
+    assert proc.returncode == 2 and "not valid UTF-8" in proc.stderr and "Traceback" not in proc.stderr
+    proc = subprocess.run(cli, input=b"fix caf\xe9 bug", capture_output=True)
+    assert proc.returncode == 2 and b"not valid UTF-8" in proc.stderr
+
+
+def test_any_error_while_writing_the_handoff_still_records_the_run(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(*args, **kwargs):
+        raise UnicodeEncodeError("utf-8", "x", 0, 1, "surrogates not allowed")
+
+    monkeypatch.setattr(run_mod, "write_handoff", broken)
+    outcome = _run(project, "dry")
+    assert outcome.code == 1 and outcome.status == "handoff-write-failed"
+    assert [r["status"] for r in read_records()] == ["handoff-write-failed"]
+
+
+def test_a_signal_before_the_fallback_writes_this_runs_handoff(
+    project: Path, fake_cli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (project / "HANDOFF.md").write_text("STALE HANDOFF FROM A PREVIOUS RUN\n", encoding="utf-8")
+    fake_cli(script="echo 'usage limit reached, try again later'; exit 1")
+    real = run_mod.append_record
+
+    def interrupted(record):
+        os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(0.1)
+        return real(record)
+
+    monkeypatch.setattr(run_mod, "append_record", interrupted)
+    outcome = _run(project, "shim")
+    assert outcome.status == "quota-exhausted" and outcome.stop_signal == signal.SIGINT
+    assert [r["status"] for r in read_records()] == ["quota-exhausted"], "no fallback after a signal"
+    handoff = (project / "HANDOFF.md").read_text(encoding="utf-8")
+    assert "STALE" not in handoff and "- status: quota-exhausted" in handoff
 
 
 def test_empty_mcp_config_is_restored_when_tampered(project: Path) -> None:

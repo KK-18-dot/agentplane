@@ -35,7 +35,7 @@ from .config import Config, ensure_state_dir
 from .errors import AgentplaneError, UsageError
 from .handoff import mask_secrets
 from .routing import resolve_route
-from .run import run_task
+from .run import cancel_exit_code, run_task
 
 CASE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 EXCLUDED_STATUSES = ("quota-exhausted", "auth-required", "cancelled")
@@ -216,10 +216,8 @@ def run_suite(
                 )
                 for reason in reasons:
                     print(f"     - {reason}")
-                if rec.status == "cancelled":
-                    stopped, stop_code = f"{case_dir.name} trial {trial}", rec.exit
-                elif outcome.late_signal is not None:
-                    stopped, stop_code = f"{case_dir.name} trial {trial}", 128 + outcome.late_signal
+                if outcome.stop_signal is not None:
+                    stopped, stop_code = f"{case_dir.name} trial {trial}", cancel_exit_code(outcome.stop_signal)
     report_path = results_dir / "report.md"
     report_path.write_text(render_report(results, None), encoding="utf-8")
     if stopped:
@@ -275,16 +273,30 @@ def regressions(rows: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> l
     return found
 
 
-def uncompared(rows: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> list[str]:
-    """Baseline cases the regression gate could not judge, so CI output can name them."""
+def incomplete(rows: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> list[str]:
+    """Why these results cannot pass the regression gate even without a lower pass rate.
+
+    A suite that was stopped, a case that dropped out, or a case whose every run was excluded shows
+    nothing about the baseline's cases. Excluding them silently would let an interrupted run (or a
+    provider that signals its own evaluator) pass the gate.
+    """
     rates, base_rates = _pass_rates(rows), _pass_rates(baseline)
-    notes = [f"{case} (only in the baseline)" for case in sorted(set(base_rates) - set(rates))]
+    notes = [f"{r['case']} trial {r['trial']} was cancelled" for r in rows if r.get("status") == "cancelled"]
+    notes += [f"{case} (in the baseline, missing from these results)" for case in sorted(set(base_rates) - set(rates))]
     for case in sorted(set(rates) & set(base_rates)):
-        if not rates[case][1]:
+        if not rates[case][1] and base_rates[case][1]:
             notes.append(f"{case} (every run excluded: quota, login or cancelled)")
-        elif not base_rates[case][1]:
-            notes.append(f"{case} (every baseline run excluded: quota, login or cancelled)")
     return notes
+
+
+def uncompared(rows: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> list[str]:
+    """Cases the gate skips without failing: every baseline run was excluded."""
+    rates, base_rates = _pass_rates(rows), _pass_rates(baseline)
+    return [
+        f"{case} (every baseline run excluded: quota, login or cancelled)"
+        for case in sorted(set(rates) & set(base_rates))
+        if not base_rates[case][1]
+    ]
 
 
 def render_report(results: list[CaseResult] | list[dict[str, Any]], baseline: list[dict[str, Any]] | None) -> str:

@@ -18,9 +18,10 @@
 - The ledger no longer stores the full task for `task_via = "arg"` providers (cursor, gemini): `command` records `<task>` in its place, and `task_head` is masked like the HANDOFF. Ledger lines are appended with a single `os.write` on an `O_APPEND` descriptor.
 - State files were world-readable. The state directory, `logs/` and `evals/` are now created 0700, log files and `runs.jsonl` 0600, without touching the umask the provider inherits. `doctor` warns when an existing state directory or ledger is open to group/other and prints the `chmod` fix. Token shapes are masked in the log on disk after each run.
 - `eval report` now implements the documented rule: runs with status `quota-exhausted`, `auth-required` or `cancelled` are excluded from pass rates and counted in a new `excluded` column. `timeout` still counts as a failure, and `docs/evals.md` now says so.
-- Ctrl-C during `eval run` stopped only the current trial and the suite went on, with the cancelled trial counted as a failure. A cancelled trial now stops the suite (exit 130 / 143) after its row and the report are written.
+- Ctrl-C during `eval run` stopped only the current trial and the suite went on, with the cancelled trial counted as a failure. A cancelled trial now stops the suite (exit 130 / 143) after its row and the report are written, even when its HANDOFF could not be written.
+- A task that is not valid UTF-8 crashed after the provider had started and left no ledger row (and, for stdin providers, a provider waiting until the timeout). It is now refused before launch with exit 2, whether it came as an argument, on stdin or through `--task-file` (which printed a traceback). Any error while writing the HANDOFF now ends as `handoff-write-failed` with a ledger row, and the provider's stdin is always closed.
 - A provider's short final lines, including its `AGENTPLANE-STATUS` line, could be lost when a process it started detached and kept the output pipe open. Output is now logged as soon as it is readable.
-- A signal that arrived while the HANDOFF and ledger row were being written could kill agentplane between the two. Both are now written first.
+- A signal that arrived while the HANDOFF and ledger row were being written could kill agentplane between the two. Both are now written first. When a signal stops a run before its fallback, the HANDOFF describes that run instead of keeping an older file.
 
 ### Security
 
@@ -40,7 +41,7 @@ Findings from a review of the changes above, fixed before release:
 - Run lineage: the ledger has a `parent` field, taken from `AGENTPLANE_PARENT` when it is a plain token (otherwise ignored with a warning). agentplane sets `AGENTPLANE_PARENT` to the current run id for every provider it launches, so nested delegation is traceable from the ledger, and scripts or CI can set it to their own id.
 - `agentplane run --json` prints the final ledger record as one JSON object on stdout (no provider echo, no `HANDOFF:` line).
 - `docs/handoff.md` documents the ledger fields as a stable interface and the `status` values as a closed vocabulary.
-- `agentplane eval report RESULTS --baseline BASE --fail-on-regression` exits 1 when a case present in both files has a lower pass rate than the baseline, for CI.
+- `agentplane eval report RESULTS --baseline BASE --fail-on-regression` exits 1 when a case present in both files has a lower pass rate than the baseline, or when the results are incomplete (a cancelled trial, a missing baseline case, or a baseline case whose every run was excluded), for CI.
 - Eval result rows carry `run_id`, the ledger id of the run.
 - `max_bytes` on render targets. The built-in `codex` target sets 32768, the size at which Codex CLI stops reading `AGENTS.md`. An oversized target is still written with a warning, fails `render --check` as `too-large`, and is a `doctor` WARN.
 

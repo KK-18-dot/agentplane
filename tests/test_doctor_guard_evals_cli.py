@@ -266,28 +266,72 @@ def test_eval_report_fail_on_regression(sandbox: Path, capsys) -> None:
         path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
         return str(path)
 
-    base = write("base", [_row("a", True), _row("a", True, trial=2), _row("b", False), _row("gone", True)])
-    same = write("same", [_row("a", True), _row("a", True, trial=2), _row("b", False), _row("new", False)])
-    better = write("better", [_row("a", True), _row("b", True)])
-    worse = write("worse", [_row("a", True), _row("a", False, trial=2), _row("b", False)])
-    infra = write("infra", [_row("a", True), _row("a", False, "quota-exhausted", 2), _row("b", False)])
+    def gate(results: str, baseline: str) -> tuple[int, str]:
+        capsys.readouterr()
+        code = main(["eval", "report", results, "--baseline", baseline, "--fail-on-regression"])
+        return code, capsys.readouterr().err
+
+    gone = _row("gone", True)
+    base = write("base", [_row("a", True), _row("a", True, trial=2), _row("b", False), gone])
+    same = write("same", [_row("a", True), _row("a", True, trial=2), _row("b", False), gone, _row("new", False)])
+    better = write("better", [_row("a", True), _row("b", True), gone])
+    worse = write("worse", [_row("a", True), _row("a", False, trial=2), _row("b", False), gone])
+    infra = write("infra", [_row("a", True), _row("a", False, "quota-exhausted", 2), _row("b", False), gone])
     for results in (same, better, infra):
-        assert main(["eval", "report", results, "--baseline", base, "--fail-on-regression"]) == 0, results
+        assert gate(results, base)[0] == 0, results
+    code, err = gate(worse, base)
+    assert code == 1 and "regression: a: 1/2 (50%) < baseline 2/2 (100%)" in err
     capsys.readouterr()
-    assert main(["eval", "report", worse, "--baseline", base, "--fail-on-regression"]) == 1
-    captured = capsys.readouterr()
-    assert "| a | p/m/e | 1/2 | 50% | 0 | 2/2 (100%) | -50pt |" in captured.out
-    assert "regression: a: 1/2 (50%) < baseline 2/2 (100%)" in captured.err
     assert main(["eval", "report", worse, "--baseline", base]) == 0
+    assert "| a | p/m/e | 1/2 | 50% | 0 | 2/2 (100%) | -50pt |" in capsys.readouterr().out
     assert main(["eval", "report", worse, "--fail-on-regression"]) == 2
     assert "--fail-on-regression needs --baseline" in capsys.readouterr().err
-    # cases that cannot be compared do not fail the gate, but they are named
-    assert main(["eval", "report", infra, "--baseline", base, "--fail-on-regression"]) == 0
-    err = capsys.readouterr().err
-    assert "not compared: gone (only in the baseline)" in err
-    all_infra = write("all-infra", [_row("a", False, "auth-required"), _row("b", False)])
-    assert main(["eval", "report", all_infra, "--baseline", base, "--fail-on-regression"]) == 0
-    assert "not compared: a (every run excluded: quota, login or cancelled)" in capsys.readouterr().err
+    # results that cannot show the baseline's cases fail the gate: a stopped suite, a dropped case, all runs excluded
+    dropped = write("dropped", [_row("a", True), _row("a", True, trial=2), _row("b", False)])
+    code, err = gate(dropped, base)
+    assert code == 1 and "incomplete: gone (in the baseline, missing from these results)" in err
+    all_infra = write("all-infra", [_row("a", False, "auth-required"), _row("b", False), gone])
+    code, err = gate(all_infra, base)
+    assert code == 1 and "incomplete: a (every run excluded: quota, login or cancelled)" in err
+    cancelled = write("cancelled", [_row("a", True), _row("a", False, "cancelled", 2), _row("b", False), gone])
+    code, err = gate(cancelled, base)
+    assert code == 1 and "incomplete: a trial 2 was cancelled" in err
+    # a baseline case whose runs were all excluded cannot be compared, and does not fail the candidate
+    base_infra = write("base-infra", [_row("a", False, "quota-exhausted"), _row("b", False), gone])
+    code, err = gate(write("plain", [_row("a", False), _row("b", False), gone]), base_infra)
+    assert code == 0 and "not compared: a (every baseline run excluded: quota, login or cancelled)" in err
+
+
+def test_a_cancelled_trial_stops_the_suite_even_when_its_handoff_cannot_be_written(
+    project: Path, sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentplane import run as run_mod
+
+    def broken(*args, **kwargs):
+        raise AgentplaneError("disk full")
+
+    monkeypatch.setattr(run_mod, "write_handoff", broken)
+    monkeypatch.setenv("AGENTPLANE_MOCK_SLEEP", "3")
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    try:
+        with pytest.raises(AgentplaneError) as info:
+            run_suite(
+                load_config(project), _suite(sandbox), role="dry", provider=None, trials=2, results_dir=sandbox / "out"
+            )
+    finally:
+        timer.cancel()
+    assert info.value.code == 130
+    rows = load_results(sandbox / "out" / "results.jsonl")
+    assert [(r["case"], r["status"]) for r in rows] == [("echo-ok", "handoff-write-failed")]
+
+
+def test_a_late_sighup_stops_the_suite_with_the_documented_code() -> None:
+    from agentplane.run import cancel_exit_code
+
+    assert cancel_exit_code(signal.SIGHUP) == 143
+    assert cancel_exit_code(signal.SIGTERM) == 143
+    assert cancel_exit_code(signal.SIGINT) == 130
 
 
 def test_check_script_output_is_masked_in_results(project: Path, sandbox: Path) -> None:
