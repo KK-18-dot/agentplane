@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -244,4 +245,6 @@ def read_records(limit: int | None = None) -> list[dict[str, Any]]:
 
 
 def new_run_id(provider: str) -> str:
-    return f"{time.strftime('%Y%m%d%H%M%S')}-{provider}-{os.getpid()}"
+    """Timestamp, provider and pid for humans; the random suffix keeps runs that one process
+    starts within the same second (eval trials) apart."""
+    return f"{time.strftime('%Y%m%d%H%M%S')}-{provider}-{os.getpid()}-{secrets.token_hex(3)}"

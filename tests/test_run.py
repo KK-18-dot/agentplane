@@ -1,9 +1,13 @@
 import json
 import os
+import re
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from agentplane import handoff as handoff_mod
+from agentplane import run as run_mod
 from agentplane.config import load_config, state_dir
 from agentplane.errors import EXIT_EMPTY, EXIT_TIMEOUT, SafetyError, UsageError
 from agentplane.handoff import read_records, self_report
@@ -80,6 +84,101 @@ def test_changed_files_are_measured_from_git(project: Path, fake_cli) -> None:
     outcome = _run(project, "shim")
     assert "?? created.txt" in outcome.record.changed
     assert "- ?? created.txt" in (project / "HANDOFF.md").read_text()
+
+
+GIT_ID = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+
+
+def _commit(project: Path, *paths: str) -> None:
+    subprocess.run(["git", "add", *paths], cwd=project, check=True)
+    subprocess.run(["git", *GIT_ID, "commit", "-qm", "base"], cwd=project, check=True)
+
+
+def test_changed_sees_edits_to_dirty_files_and_files_in_untracked_dirs(project: Path, fake_cli) -> None:
+    (project / "a.txt").write_text("base\n")
+    _commit(project, "a.txt")
+    (project / "a.txt").write_text("edited before the run\n")
+    (project / "nd").mkdir()
+    (project / "nd" / "one.txt").write_text("1\n")
+    fake_cli(script="echo more >> a.txt; echo 2 > nd/two.txt; echo ok; echo 'AGENTPLANE-STATUS: DONE'")
+    changed = _run(project, "shim").record.changed
+    assert " M a.txt (modified before the run and again during it)" in changed
+    assert "?? nd/two.txt" in changed
+    assert not any("nd/one.txt" in line for line in changed)
+    assert not any("agentplane.toml" in line for line in changed)  # dirty before, untouched
+
+
+def test_changed_lists_commits_made_by_the_provider(project: Path, fake_cli) -> None:
+    (project / "a.txt").write_text("base\n")
+    _commit(project, "a.txt")
+    (project / "a.txt").write_text("edited before the run\n")
+    fake_cli(
+        script="echo new > c.txt; git add c.txt a.txt; "
+        "git -c user.name=p -c user.email=p@example.invalid commit -qm provider; "
+        "echo ok; echo 'AGENTPLANE-STATUS: DONE'"
+    )
+    changed = _run(project, "shim").record.changed
+    assert re.fullmatch(r"commits: [0-9a-f]{7}\.\.[0-9a-f]{7} \(1\)", changed[0]), changed
+    assert "committed A c.txt" in changed and "committed M a.txt" in changed
+    assert "(clean now; was modified before the run) a.txt" in changed
+    assert "- committed A c.txt" in (project / "HANDOFF.md").read_text()
+
+
+def test_changed_lists_root_commits_from_an_unborn_head(project: Path, fake_cli) -> None:
+    fake_cli(
+        script="echo one > r1.txt; git add r1.txt; git -c user.name=p -c user.email=p@x.invalid commit -qm one; "
+        "echo two > r2.txt; git add r2.txt; git -c user.name=p -c user.email=p@x.invalid commit -qm two; "
+        "echo ok; echo 'AGENTPLANE-STATUS: DONE'"
+    )
+    changed = _run(project, "shim").record.changed
+    assert re.fullmatch(r"commits: \(none\)\.\.[0-9a-f]{7} \(2\)", changed[0]), changed
+    assert "committed A r1.txt" in changed and "committed A r2.txt" in changed
+
+
+def test_changed_sees_a_retargeted_symlink(project: Path, fake_cli) -> None:
+    (project / "lnk").symlink_to("one")
+    fake_cli(script="ln -sfn two lnk; echo ok; echo 'AGENTPLANE-STATUS: DONE'")
+    assert "?? lnk (modified before the run and again during it)" in _run(project, "shim").record.changed
+
+
+def test_changed_skips_content_hashes_above_the_limit(
+    project: Path, fake_cli, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(run_mod, "HASH_LIMIT", 2)
+    (project / "big.txt").write_text("x\n")
+    fake_cli(script="echo more >> big.txt; echo new > fresh.txt; echo ok; echo 'AGENTPLANE-STATUS: DONE'")
+    changed = _run(project, "shim").record.changed
+    assert any(line.startswith("(more than 2 dirty paths") for line in changed)
+    assert "?? fresh.txt" in changed
+    assert not any("big.txt" in line for line in changed)  # the documented blind spot
+
+
+def test_changed_outside_git_says_so(sandbox: Path, project: Path) -> None:
+    plain = sandbox / "work" / "plain"
+    plain.mkdir()
+    cfg = load_config(project)
+    outcome = run_task(cfg, "x", route=resolve_route(cfg, role="dry"), target_dir=plain, echo=False)
+    assert outcome.record.changed == ["(not a git repository: changes could not be detected)"]
+
+
+# ---- run ids and logs -------------------------------------------------------------------------
+
+
+def test_runs_in_the_same_second_get_distinct_ids_and_logs(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(handoff_mod.time, "strftime", lambda fmt, *a: "20260917000000")
+    ids = [_run(project, "dry", f"task {n}").record.id for n in range(3)]
+    assert len(set(ids)) == 3
+    assert len(list((state_dir() / "logs").glob("*.log"))) == 3
+
+
+def test_a_colliding_run_id_never_overwrites_an_existing_log(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    ids = iter(["same-id", "same-id", "other-id"])
+    monkeypatch.setattr(run_mod, "new_run_id", lambda provider: next(ids))
+    first = _run(project, "dry", "first task").record
+    second = _run(project, "dry", "second task").record
+    assert (first.id, second.id) == ("same-id", "other-id")
+    assert "first task" in Path(first.log).read_text()
+    assert "second task" in Path(second.log).read_text()
 
 
 # ---- status vocabulary ---------------------------------------------------------------------

@@ -10,14 +10,16 @@ Safety boundaries (all fail closed, exit 3):
 
 from __future__ import annotations
 
+import hashlib
 import os
 import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
+from typing import BinaryIO
 
 from .config import Config, state_dir
 from .errors import EXIT_EMPTY, EXIT_TIMEOUT, AgentplaneError, ConfigError, SafetyError, UsageError
@@ -168,25 +170,186 @@ def build_env(cfg: Config, route: Route, depth: int) -> dict[str, str]:
 # ---- execution ----------------------------------------------------------------------------------
 
 
-def git_state(target: Path) -> list[str] | None:
+NOT_GIT_NOTE = "(not a git repository: changes could not be detected)"
+AGAIN_SUFFIX = " (modified before the run and again during it)"
+CLEAN_NOW_PREFIX = "(clean now; was modified before the run) "
+HASH_LIMIT = 5000
+
+
+@dataclass
+class GitSnapshot:
+    """HEAD plus every dirty path with a fingerprint of its content.
+
+    Comparing ``git status`` lines alone misses a second edit to a file that was already dirty,
+    new files inside a directory that was already untracked, and commits made by the provider,
+    so the snapshot keeps the commit and a per-path content fingerprint instead.
+    """
+
+    root: Path
+    head: str | None  # None while HEAD is unborn
+    entries: dict[str, tuple[str, str]] = field(default_factory=dict)  # path -> (XY, fingerprint)
+    hashed: bool = True
+    error: str | None = None
+
+
+def _git(root: Path, *args: str, stdin: bytes | None = None, timeout: int = 60) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        input=stdin,
+        stdin=None if stdin is not None else subprocess.DEVNULL,
+        capture_output=True,
+        timeout=timeout,
+    )
+
+
+def _display(path: str) -> str:
+    """Paths are kept as os.fsdecode() strings; show undecodable bytes as escapes."""
+    return path.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+
+
+def _blob_hash(path: Path) -> str:
+    """Same value as ``git hash-object --no-filters`` in a SHA-1 repository."""
     try:
-        probe = subprocess.run(
-            ["git", "-C", str(target), "rev-parse", "--is-inside-work-tree"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
+        digest = hashlib.sha1(f"blob {path.stat().st_size}\0".encode(), usedforsecurity=False)
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+    except OSError:
+        return "missing"
+    return digest.hexdigest()
+
+
+def _fingerprints(root: Path, paths: list[str]) -> dict[str, str]:
+    prints: dict[str, str] = {}
+    batch: list[str] = []
+    for rel in paths:
+        full = root / rel
+        if full.is_symlink():
+            prints[rel] = "link:" + os.readlink(full)
+        elif full.is_file():
+            # --stdin-paths reads one path per line and C-unquotes a leading '"'.
+            if "\n" in rel or rel.startswith('"'):
+                prints[rel] = _blob_hash(full)
+            else:
+                batch.append(rel)
+        elif full.is_dir():
+            prints[rel] = "dir"  # an untracked nested repository or a submodule
+        else:
+            prints[rel] = "missing"
+    if batch:
+        stdin = b"".join(os.fsencode(rel) + b"\n" for rel in batch)
+        res = _git(root, "hash-object", "--no-filters", "--stdin-paths", stdin=stdin, timeout=300)
+        hashes = res.stdout.decode("ascii", "replace").split()
+        if res.returncode == 0 and len(hashes) == len(batch):
+            prints.update(zip(batch, hashes, strict=True))
+        else:  # a file vanished between status and hashing: hash one by one
+            prints.update((rel, _blob_hash(root / rel)) for rel in batch)
+    return prints
+
+
+def git_state(target: Path) -> GitSnapshot | None:
+    """Snapshot the repository around ``target``; None when it is not inside a work tree."""
+    try:
+        probe = _git(target, "rev-parse", "--is-inside-work-tree", "--show-toplevel", timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
-    if probe.returncode != 0:
+    lines = probe.stdout.decode("utf-8", "surrogateescape").splitlines()
+    if probe.returncode != 0 or not lines or lines[0] != "true" or len(lines) < 2:
         return None
-    status = subprocess.run(
-        ["git", "-C", str(target), "status", "--porcelain"], capture_output=True, text=True, timeout=60
-    )
-    return sorted(line for line in status.stdout.splitlines() if line.strip())
+    root = Path(lines[1])
+    try:
+        head_res = _git(root, "rev-parse", "--verify", "-q", "HEAD")
+        status = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames")
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return GitSnapshot(root, None, error=f"git status failed: {exc}")
+    if status.returncode != 0:
+        detail = status.stderr.decode("utf-8", "replace").strip().splitlines()
+        return GitSnapshot(root, None, error="git status failed" + (f": {detail[-1]}" if detail else ""))
+    head = head_res.stdout.decode("ascii", "replace").strip() if head_res.returncode == 0 else None
+
+    states: dict[str, str] = {}
+    tokens = iter(status.stdout.split(b"\0"))
+    for token in tokens:
+        if len(token) < 4:
+            continue
+        xy = token[:2].decode("ascii", "replace")
+        states[os.fsdecode(token[3:])] = xy
+        if "R" in xy or "C" in xy:  # not produced with --no-renames; skip the source path anyway
+            next(tokens, None)
+    if len(states) > HASH_LIMIT:
+        return GitSnapshot(root, head, {p: (xy, "") for p, xy in states.items()}, hashed=False)
+    prints = _fingerprints(root, list(states))
+    return GitSnapshot(root, head, {p: (xy, prints[p]) for p, xy in states.items()})
 
 
-def _run_mock(cfg: Config, route: Route, task: str, target: Path, log_path: Path, echo: bool) -> int:
+def _commit_lines(root: Path, old: str | None, new: str | None) -> list[str]:
+    old_label = old[:7] if old else "(none)"
+    if new is None:
+        return [f"commits: {old_label}..(none) (HEAD is unborn now)"]
+    try:
+        count_res = _git(root, "rev-list", "--count", f"{old}..{new}" if old else new)
+        # From an unborn HEAD every commit is new: diff against the empty tree, not just the last commit.
+        base = old or _git(root, "hash-object", "-t", "tree", "--stdin", stdin=b"").stdout.decode().strip()
+        diff = _git(root, "diff", "--name-status", "--no-renames", "--no-ext-diff", "-z", base, new)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [f"commits: {old_label}..{new[:7]} (could not be listed: {exc})"]
+    count = count_res.stdout.decode().strip() if count_res.returncode == 0 else "?"
+    moved = " (HEAD moved without adding commits)" if count == "0" else ""
+    lines = [f"commits: {old_label}..{new[:7]} ({count}){moved}"]
+    fields = diff.stdout.split(b"\0") if diff.returncode == 0 else []
+    for status, path in zip(fields[0::2], fields[1::2], strict=False):
+        if status:
+            lines.append(f"committed {status.decode('ascii', 'replace')} {_display(os.fsdecode(path))}")
+    return lines
+
+
+def diff_git_state(before: GitSnapshot | None, after: GitSnapshot | None) -> list[str]:
+    """What the run changed: new commits, then paths whose status or content moved."""
+    if before is None or after is None:
+        return [NOT_GIT_NOTE]
+    if before.error or after.error:
+        return [f"(changes could not be detected: {before.error or after.error})"]
+    lines: list[str] = []
+    if before.head != after.head:
+        lines.extend(_commit_lines(after.root, before.head, after.head))
+    compare_content = before.hashed and after.hashed
+    if not compare_content:
+        lines.append(
+            f"(more than {HASH_LIMIT} dirty paths: content was not compared, so further edits to paths "
+            "that were already dirty are not listed)"
+        )
+    for path in sorted(after.entries):
+        xy, digest = after.entries[path]
+        old = before.entries.get(path)
+        if old is None:
+            lines.append(f"{xy} {_display(path)}")
+        elif old[0] != xy or (compare_content and old[1] != digest):
+            lines.append(f"{xy} {_display(path)}{AGAIN_SUFFIX}")
+    for path in sorted(set(before.entries) - set(after.entries)):
+        lines.append(f"{CLEAN_NOW_PREFIX}{_display(path)}")
+    return lines
+
+
+def _create_log(provider: str) -> tuple[str, Path, int]:
+    """Reserve a run id by creating its log file exclusively.
+
+    The id already carries a random suffix; O_EXCL makes a collision a retry instead of two runs
+    silently sharing (and overwriting) one log.
+    """
+    log_dir = state_dir() / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    for _ in range(5):
+        run_id = new_run_id(provider)
+        log_path = log_dir / f"{run_id}.log"
+        try:
+            return run_id, log_path, os.open(log_path, flags, 0o600)
+        except FileExistsError:
+            continue
+    raise AgentplaneError(f"could not allocate a unique run id in {log_dir}")
+
+
+def _run_mock(cfg: Config, route: Route, task: str, target: Path, log: BinaryIO, echo: bool) -> int:
     spec = cfg.providers[route.provider]
     response = os.environ.get("AGENTPLANE_MOCK_RESPONSE")
     if response is None:
@@ -201,7 +364,7 @@ def _run_mock(cfg: Config, route: Route, task: str, target: Path, log_path: Path
     sleep = float(os.environ.get("AGENTPLANE_MOCK_SLEEP", "0") or 0)
     if sleep > route.timeout:
         time.sleep(route.timeout)
-        log_path.write_text("[mock] still running\n", encoding="utf-8")
+        log.write(b"[mock] still running\n")
         return EXIT_TIMEOUT
     if sleep:
         time.sleep(sleep)
@@ -212,7 +375,7 @@ def _run_mock(cfg: Config, route: Route, task: str, target: Path, log_path: Path
                 raise SafetyError(f"mock writes outside --dir: {rel}")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(str(content), encoding="utf-8")
-    log_path.write_text(response, encoding="utf-8")
+    log.write(response.encode("utf-8"))
     if echo:
         sys.stdout.write(response)
         sys.stdout.flush()
@@ -220,47 +383,46 @@ def _run_mock(cfg: Config, route: Route, task: str, target: Path, log_path: Path
 
 
 def _run_cli(
-    argv: list[str], stdin_text: str | None, env: dict[str, str], cwd: Path, timeout: int, log_path: Path, echo: bool
+    argv: list[str], stdin_text: str | None, env: dict[str, str], cwd: Path, timeout: int, log: BinaryIO, echo: bool
 ) -> int:
-    with log_path.open("wb") as log:
-        try:
-            proc = subprocess.Popen(
-                argv,
-                cwd=str(cwd),
-                env=env,
-                stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
-        except OSError as exc:
-            raise AgentplaneError(f"cannot start provider: {exc}") from exc
+    try:
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(cwd),
+            env=env,
+            stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        raise AgentplaneError(f"cannot start provider: {exc}") from exc
 
-        def pump() -> None:
-            assert proc.stdout is not None
-            for chunk in iter(lambda: proc.stdout.read(4096), b""):
-                log.write(chunk)
-                log.flush()
-                if echo:
-                    sys.stdout.buffer.write(chunk)
-                    sys.stdout.buffer.flush()
+    def pump() -> None:
+        assert proc.stdout is not None
+        for chunk in iter(lambda: proc.stdout.read(4096), b""):
+            log.write(chunk)
+            log.flush()
+            if echo:
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
 
-        reader = threading.Thread(target=pump, daemon=True)
-        reader.start()
-        if stdin_text is not None and proc.stdin is not None:
-            try:
-                proc.stdin.write(stdin_text.encode("utf-8"))
-                proc.stdin.close()
-            except BrokenPipeError:
-                pass
-        timed_out = False
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
+    if stdin_text is not None and proc.stdin is not None:
         try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            _terminate(proc)
-        reader.join(timeout=30)
-        return EXIT_TIMEOUT if timed_out else proc.returncode
+            proc.stdin.write(stdin_text.encode("utf-8"))
+            proc.stdin.close()
+        except BrokenPipeError:
+            pass
+    timed_out = False
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _terminate(proc)
+    reader.join(timeout=30)
+    return EXIT_TIMEOUT if timed_out else proc.returncode
 
 
 def _terminate(proc: subprocess.Popen) -> None:
@@ -304,25 +466,26 @@ def run_task(
             f"Run `agentplane doctor`, or choose another role/provider."
         )
 
-    log_dir = state_dir() / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    run_id = new_run_id(route.provider)
-    log_path = log_dir / f"{run_id}.log"
     full_task = PREAMBLE + task
     spec = cfg.providers[route.provider]
+    if spec.get("kind", "cli") == "mock":
+        argv, stdin_text = ["<mock>"], None
+    else:
+        argv, stdin_text = build_command(cfg, route, full_task, target)
+    run_id, log_path, log_fd = _create_log(route.provider)
 
     before = git_state(target)
     start = time.monotonic()
-    if spec.get("kind", "cli") == "mock":
-        argv = ["<mock>"]
-        code = _run_mock(cfg, route, task, target, log_path, echo)
-    else:
-        argv, stdin_text = build_command(cfg, route, full_task, target)
-        env = build_env(cfg, route, depth)
-        code = _run_cli(argv, stdin_text, env, target, route.timeout, log_path, echo)
-    seconds = int(time.monotonic() - start)
-
-    log_text = log_path.read_text(encoding="utf-8", errors="replace") if log_path.is_file() else ""
+    with os.fdopen(log_fd, "w+b") as log:
+        if spec.get("kind", "cli") == "mock":
+            code = _run_mock(cfg, route, task, target, log, echo)
+        else:
+            env = build_env(cfg, route, depth)
+            code = _run_cli(argv, stdin_text, env, target, route.timeout, log, echo)
+        seconds = int(time.monotonic() - start)
+        log.flush()
+        log.seek(0)
+        log_text = log.read().decode("utf-8", errors="replace")
     if code == 0 and len(log_text.encode("utf-8")) < int(cfg.run.get("min_output_bytes", 200)):
         print(f"agentplane: warning: exit 0 but output is shorter than min_output_bytes: {log_path}", file=sys.stderr)
         code = EXIT_EMPTY
@@ -334,11 +497,7 @@ def run_task(
     reported = self_report(log_text)
     status_name, next_note = status_for(code if code in (0, EXIT_EMPTY, EXIT_TIMEOUT) else 1, reported, kind)
 
-    after = git_state(target)
-    if before is None or after is None:
-        changed: list[str] = ["(not a git repository: changes could not be detected)"]
-    else:
-        changed = sorted(set(after) ^ set(before))
+    changed = diff_git_state(before, git_state(target))
 
     record = RunRecord(
         id=run_id,
