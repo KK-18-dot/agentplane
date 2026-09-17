@@ -256,14 +256,24 @@ def cmd_status(args: argparse.Namespace) -> int:
     _out("")
     _out("## git")
     if shutil.which("git"):
-        res = subprocess.run(
-            ["git", "-C", str(cfg.project_dir), "status", "--porcelain", "--branch"], capture_output=True, text=True
-        )
-        if res.returncode == 0:
-            lines = res.stdout.splitlines()
-            _out(f"- {lines[0][3:] if lines else '?'}; dirty files: {len(lines) - 1 if lines else 0}")
+        from .run import UnsafeRepository, filter_overrides, safe_git
+
+        # The project may be a --dir a provider wrote to: git must not run anything planted in it.
+        try:
+            res = safe_git(
+                cfg.project_dir, "status", "--porcelain", "--branch", "--ignore-submodules=dirty",
+                config=filter_overrides(cfg.project_dir),
+            )  # fmt: skip
+        except UnsafeRepository as exc:
+            _out(f"- git status skipped: {exc}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            _out(f"- git status failed: {exc}")
         else:
-            _out("- not a git repository")
+            if res.returncode == 0:
+                lines = res.stdout.decode("utf-8", "replace").splitlines()
+                _out(f"- {lines[0][3:] if lines else '?'}; dirty files: {len(lines) - 1 if lines else 0}")
+            else:
+                _out("- not a git repository")
     _out("")
     _out("## contract")
     if cfg.policy_file.is_file():

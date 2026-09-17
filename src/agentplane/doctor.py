@@ -20,7 +20,7 @@ from .errors import AgentplaneError
 from .handoff import ledger_path
 from .render import is_generated, render
 from .routing import all_provider_status, explain_routes
-from .run import forbidden_in_definition
+from .run import forbidden_in_definition, safe_git
 
 SECRET_NAME_GLOBS = [
     ".env",
@@ -73,21 +73,17 @@ class Report:
         return "\n".join(lines)
 
 
-def _git(project_dir: Path, *args: str) -> subprocess.CompletedProcess[str] | None:
-    try:
-        return subprocess.run(["git", "-C", str(project_dir), *args], capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-
-
 def check_tracked_secret_names(project_dir: Path, report: Report) -> None:
     """Only file *names* are inspected, never contents."""
-    res = _git(project_dir, "ls-files", "-z")
+    try:
+        res = safe_git(project_dir, "ls-files", "-z")
+    except (OSError, subprocess.TimeoutExpired):
+        res = None
     if res is None or res.returncode != 0:
         report.note("not a git repository: tracked-secret-name check skipped")
         return
     hits = []
-    for name in res.stdout.split("\0"):
+    for name in res.stdout.decode("utf-8", "replace").split("\0"):
         if not name:
             continue
         if any(fnmatch.fnmatch(name, g) for g in SECRET_NAME_EXEMPT):

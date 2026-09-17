@@ -323,9 +323,15 @@ def _git_env() -> dict[str, str]:
     return env
 
 
-def _git(
+def safe_git(
     root: Path, *args: str, stdin: bytes | None = None, timeout: int = 60, config: tuple[str, ...] = ()
 ) -> subprocess.CompletedProcess[bytes]:
+    """Run git in a repository a provider may have written to (see SAFE_GIT_ARGS).
+
+    Every git call agentplane makes in a project goes through here: ``run``'s snapshot, and the
+    ``doctor`` and ``status`` commands a person runs later in the same repository. Commands that
+    can run filter drivers (``status``) also need ``config=filter_overrides(root)``.
+    """
     return subprocess.run(
         ["git", *SAFE_GIT_ARGS, *config, "-C", str(root), *args],
         input=stdin,
@@ -426,7 +432,7 @@ def _fingerprints(root: Path, paths: list[str]) -> dict[str, str]:
             batch.append(rel)
     if batch:
         stdin = b"".join(os.fsencode(rel) + b"\n" for rel in batch)
-        res = _git(root, "hash-object", "--no-filters", "--stdin-paths", stdin=stdin, timeout=300)
+        res = safe_git(root, "hash-object", "--no-filters", "--stdin-paths", stdin=stdin, timeout=300)
         hashes = res.stdout.decode("ascii", "replace").split()
         if res.returncode == 0 and len(hashes) == len(batch):
             prints.update(zip(batch, hashes, strict=True))
@@ -435,7 +441,7 @@ def _fingerprints(root: Path, paths: list[str]) -> dict[str, str]:
     return prints
 
 
-def _filter_overrides(root: Path) -> tuple[str, ...]:
+def filter_overrides(root: Path) -> tuple[str, ...]:
     """``-c filter.<name>.clean=`` pairs that switch off every configured filter driver.
 
     ``git status`` runs a driver's clean command to compare file content, so a provider that can
@@ -443,7 +449,7 @@ def _filter_overrides(root: Path) -> tuple[str, ...]:
     sandbox. User-level drivers (git-lfs) are switched off too; that can only add false
     positives to ``changed``, never run anything.
     """
-    res = _git(root, "config", "-z", "--get-regexp", r"^filter\..*\.(clean|process)$")
+    res = safe_git(root, "config", "-z", "--get-regexp", r"^filter\..*\.(clean|process)$")
     overrides: list[str] = []
     for item in res.stdout.split(b"\0"):
         key = os.fsdecode(item.split(b"\n", 1)[0])
@@ -461,7 +467,7 @@ def _filter_overrides(root: Path) -> tuple[str, ...]:
 
 def _hidden_paths(root: Path) -> dict[str, tuple[str, ...]]:
     """Tracked paths that ``git status`` will not report because of an index flag."""
-    res = _git(root, "ls-files", "-v", "-z")
+    res = safe_git(root, "ls-files", "-v", "-z")
     hidden: dict[str, tuple[str, ...]] = {}
     for token in res.stdout.split(b"\0"):
         if len(token) < 3:
@@ -495,7 +501,7 @@ def git_state(target: Path) -> GitSnapshot | None:
     recorded (with a note in ``changed``) instead of being lost.
     """
     try:
-        probe = _git(
+        probe = safe_git(
             target, "rev-parse", "--is-inside-work-tree", "--show-toplevel", "--absolute-git-dir",
             "--git-common-dir", timeout=30,
         )  # fmt: skip
@@ -514,10 +520,10 @@ def git_state(target: Path) -> GitSnapshot | None:
 
 
 def _snapshot(root: Path, git_dir: Path, common_dir: Path) -> GitSnapshot:
-    config = _filter_overrides(root)
-    head_res = _git(root, "rev-parse", "--verify", "-q", "HEAD")
+    config = filter_overrides(root)
+    head_res = safe_git(root, "rev-parse", "--verify", "-q", "HEAD")
     # --ignore-submodules=dirty: never run git inside a submodule, whose config is not covered above.
-    status = _git(
+    status = safe_git(
         root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
         "--ignore-submodules=dirty", config=config,
     )  # fmt: skip
@@ -547,10 +553,10 @@ def _commit_lines(root: Path, old: str | None, new: str | None) -> list[str]:
     if new is None:
         return [f"commits: {old_label}..(none) (HEAD is unborn now)"]
     try:
-        count_res = _git(root, "rev-list", "--count", f"{old}..{new}" if old else new)
+        count_res = safe_git(root, "rev-list", "--count", f"{old}..{new}" if old else new)
         # From an unborn HEAD every commit is new: diff against the empty tree, not just the last commit.
-        base = old or _git(root, "hash-object", "-t", "tree", "--stdin", stdin=b"").stdout.decode().strip()
-        diff = _git(root, "diff", "--name-status", "--no-renames", "--no-ext-diff", "-z", base, new)
+        base = old or safe_git(root, "hash-object", "-t", "tree", "--stdin", stdin=b"").stdout.decode().strip()
+        diff = safe_git(root, "diff", "--name-status", "--no-renames", "--no-ext-diff", "-z", base, new)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return [f"commits: {old_label}..{new[:7]} (could not be listed: {exc})"]
     count = count_res.stdout.decode().strip() if count_res.returncode == 0 else "?"

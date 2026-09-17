@@ -17,7 +17,7 @@
 
 Findings from a review of the changes above, fixed before release:
 
-- The git commands behind `changed` no longer run commands a provider planted in the repository (`core.fsmonitor`, filter drivers, the post-index-change hook), and they get the allowlisted environment instead of agentplane's own. A filter driver whose name cannot be overridden makes the snapshot refuse, with a note in `changed`.
+- The git commands behind `changed`, `doctor` and `status` no longer run commands a provider planted in the repository (`core.fsmonitor`, filter drivers, the post-index-change hook), and they get the allowlisted environment instead of agentplane's own. A filter driver whose name cannot be overridden makes the snapshot refuse, with a note in `changed`.
 - File names in `changed` are quoted with git-style escapes when they contain control or format characters, quotes or backslashes, so a file name can no longer add sections to the HANDOFF. A trailing CR in a name is hashed correctly.
 - `changed` also lists newly set `skip-worktree` / `assume-unchanged` flags and changes to git's `config`, `info/exclude`, `info/attributes` and `hooks/*`.
 - A failing or slow snapshot (for example a huge file) no longer loses the run: files above 8 MiB are fingerprinted by size and mtime, FIFOs and devices are never read, and any snapshot error becomes a note in `changed`.

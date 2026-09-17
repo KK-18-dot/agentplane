@@ -95,6 +95,35 @@ def test_doctor_warns_when_state_belongs_to_another_user(project: Path, monkeypa
     assert f"WARN state directory {state_dir()} is owned by uid {real_uid}" in text
 
 
+def test_doctor_and_status_never_run_commands_planted_in_git_config(
+    project: Path, sandbox: Path, monkeypatch, capsys
+) -> None:
+    marker = sandbox / "planted-command-ran"
+    planted = sandbox / "planted.sh"
+    planted.write_text(f"#!/bin/sh\nenv >> {marker}\ncat\n")
+    planted.chmod(0o755)
+    (project / "a.txt").write_text("base\n")
+    ident = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run(["git", "add", "a.txt"], cwd=project, check=True)
+    subprocess.run(["git", *ident, "commit", "-qm", "base"], cwd=project, check=True)
+    for key in ("core.fsmonitor", "filter.evil.clean", "filter.evil.process"):
+        subprocess.run(["git", "config", key, str(planted)], cwd=project, check=True)
+    (project / ".gitattributes").write_text("a.txt filter=evil\n")
+    (project / "a.txt").write_text("BASE\n")
+    monkeypatch.setenv("MY_API_TOKEN", "sk-must-not-reach-git-1234")
+    run_doctor(project)
+    capsys.readouterr()
+    assert main(["status", "--dir", str(project)]) == 0
+    assert "dirty files: 4" in capsys.readouterr().out
+    assert not marker.exists(), marker.read_text()[:300]
+
+
+def test_status_refuses_git_where_a_filter_cannot_be_neutralised(project: Path, capsys) -> None:
+    subprocess.run(["git", "config", "filter.a=b.clean", "/bin/false"], cwd=project, check=True)
+    assert main(["status", "--dir", str(project)]) == 0
+    assert "- git status skipped: git config defines a filter driver" in capsys.readouterr().out
+
+
 def test_doctor_reports_broken_config_as_warn(sandbox: Path) -> None:
     proj = sandbox / "work" / "broken"
     proj.mkdir(parents=True)
