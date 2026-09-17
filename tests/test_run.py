@@ -707,11 +707,12 @@ def _kill_quietly(pidfile: Path) -> None:
 def test_leftover_children_are_stopped_and_cannot_write_unmasked_output(
     project: Path, fake_cli, sandbox: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(run_mod, "OUTPUT_GRACE", 1, raising=False)
+    monkeypatch.setattr(run_mod, "OUTPUT_GRACE", 1)
     pidfile = sandbox / "child.pid"
+    # A separate bash and $$: macOS ships bash 3.2, which has no $BASHPID.
     fake_cli(
-        script=f"( trap '' TERM; echo $BASHPID > {pidfile}; "
-        "while :; do echo 'late sk-ABCDEFGHIJKLMNOP'; sleep 0.05; done ) & "
+        script=f'bash -c \'trap "" TERM; echo $$ > {pidfile}; '
+        "while :; do echo late sk-ABCDEFGHIJKLMNOP; sleep 0.05; done' & "
         "sleep 0.3; echo 'enough output for the check'; echo 'AGENTPLANE-STATUS: DONE'"
     )
     try:
@@ -730,7 +731,7 @@ def test_a_signal_while_output_is_still_collected_cancels_without_fallback(
     exited = sandbox / "leader-exited"
     pidfile = sandbox / "holder.pid"
     fake_cli(
-        script=f"( trap '' TERM; echo $BASHPID > {pidfile}; exec sleep 20 ) & "
+        script=f"bash -c 'trap \"\" TERM; echo $$ > {pidfile}; exec sleep 20' & "
         f"echo 'usage limit reached'; touch {exited}; exit 1"
     )
     proc = subprocess.Popen(
@@ -752,6 +753,54 @@ def test_a_signal_while_output_is_still_collected_cancels_without_fallback(
         assert _gone(int(pidfile.read_text()))
     finally:
         _kill_quietly(pidfile)
+
+
+def test_final_output_is_kept_when_a_detached_child_holds_the_pipe(
+    project: Path, fake_cli, sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The provider prints its status and exits while a child that left its session keeps stdout
+    # open. The short last lines must reach the log instead of waiting for a full read buffer.
+    monkeypatch.setattr(run_mod, "OUTPUT_GRACE", 1)
+    pidfile = sandbox / "detached.pid"
+    daemon = f"import os, time; os.setsid(); open({str(pidfile)!r}, 'w').write(str(os.getpid())); time.sleep(8)"
+    fake_cli(
+        script=f"{sys.executable} -c \"{daemon}\" & echo 'enough output for the minimum-size check'; "
+        "echo 'AGENTPLANE-STATUS: DONE'"
+    )
+    try:
+        record = _run(project, "shim").record
+        assert record.self_report == "DONE"
+    finally:
+        _kill_quietly(pidfile)
+
+
+def test_nested_out_cannot_be_redirected_through_a_swapped_directory(project: Path, fake_cli, sandbox: Path) -> None:
+    outside = sandbox / "outside"
+    (outside / "b").mkdir(parents=True)
+    (project / "a" / "b").mkdir(parents=True)
+    fake_cli(
+        script=f"rm -rf a; ln -s {outside} a; echo 'enough output for the minimum-size check'; "
+        "echo 'AGENTPLANE-STATUS: DONE'"
+    )
+    outcome = _run(project, "shim", out=project / "a" / "b" / "HANDOFF.md")
+    assert not (outside / "b" / "HANDOFF.md").exists()
+    assert outcome.code == 1 and outcome.record.status == "handoff-write-failed"
+    assert read_records()[-1]["status"] == "handoff-write-failed"
+
+
+def test_a_signal_while_the_record_is_written_does_not_lose_it(project: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    real = run_mod.write_handoff
+
+    def interrupted(*args, **kwargs):
+        os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(0.1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(run_mod, "write_handoff", interrupted)
+    outcome = _run(project, "dry")
+    assert outcome.status == "done" and outcome.late_signal == signal.SIGINT
+    assert (project / "HANDOFF.md").is_file()
+    assert [r["status"] for r in read_records()] == ["done"]
 
 
 def test_empty_mcp_config_is_restored_when_tampered(project: Path) -> None:

@@ -1,12 +1,17 @@
 import json
 import os
+import signal
 import subprocess
+import threading
 from pathlib import Path
+
+import pytest
 
 from agentplane import doctor as doctor_mod
 from agentplane.cli import main
 from agentplane.config import load_config, state_dir
 from agentplane.doctor import run_doctor
+from agentplane.errors import AgentplaneError
 from agentplane.evals import load_results, render_report, run_suite
 from agentplane.guard import check_paths, claude_hook
 from agentplane.handoff import read_records
@@ -225,15 +230,34 @@ def test_report_excludes_infrastructure_failures_but_counts_timeouts() -> None:
         _row("b", False, "timeout", 2),
     ]
     report = render_report(rows, None)
-    assert "| case | route | pass | rate | excluded (infrastructure) |" in report
+    assert "| case | route | pass | rate | excluded |" in report
     assert "| a | p/m/e | 1/1 | 100% | 2 |" in report
     assert "| b | p/m/e | 1/2 | 50% | 0 |" in report
-    assert "overall: 2/3 (67%); excluded (infrastructure): 2" in report
+    assert "overall: 2/3 (67%); excluded (quota, login or cancelled): 2" in report
     failures = report.split("## failures")[1].split("## excluded")[0]
     assert "b trial 2" in failures and "a trial 2" not in failures
-    assert "- a trial 2: status quota-exhausted" in report.split("## excluded (infrastructure)")[1]
+    assert "- a trial 2: status quota-exhausted" in report.split("## excluded (quota, login or cancelled)")[1]
     only_infra = render_report([_row("c", False, "quota-exhausted")], [_row("c", True)])
     assert "| c | p/m/e | 0/0 | n/a | 1 | 1/1 (100%) | n/a |" in only_infra
+
+
+def test_a_cancelled_trial_stops_the_suite_and_is_not_counted(
+    project: Path, sandbox: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENTPLANE_MOCK_SLEEP", "3")
+    timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    try:
+        with pytest.raises(AgentplaneError) as info:
+            run_suite(
+                load_config(project), _suite(sandbox), role="dry", provider=None, trials=2, results_dir=sandbox / "out"
+            )
+    finally:
+        timer.cancel()
+    assert info.value.code == 130
+    rows = load_results(sandbox / "out" / "results.jsonl")
+    assert [(r["case"], r["trial"], r["status"]) for r in rows] == [("echo-ok", 1, "cancelled")]
+    assert "| echo-ok | mock/-/low | 0/0 | n/a | 1 |" in (sandbox / "out" / "report.md").read_text()
 
 
 def test_eval_report_fail_on_regression(sandbox: Path, capsys) -> None:
@@ -263,7 +287,7 @@ def test_eval_report_fail_on_regression(sandbox: Path, capsys) -> None:
     assert "not compared: gone (only in the baseline)" in err
     all_infra = write("all-infra", [_row("a", False, "auth-required"), _row("b", False)])
     assert main(["eval", "report", all_infra, "--baseline", base, "--fail-on-regression"]) == 0
-    assert "not compared: a (every run excluded as infrastructure)" in capsys.readouterr().err
+    assert "not compared: a (every run excluded: quota, login or cancelled)" in capsys.readouterr().err
 
 
 def test_check_script_output_is_masked_in_results(project: Path, sandbox: Path) -> None:

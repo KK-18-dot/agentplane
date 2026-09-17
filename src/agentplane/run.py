@@ -73,6 +73,9 @@ class RunOutcome:
     code: int
     status: str
     record: RunRecord
+    # A cancel signal that arrived after the status was decided, while the record was written.
+    # The record stands; callers that loop (eval) stop instead of starting the next run.
+    late_signal: int | None = None
 
 
 # ---- boundary checks ---------------------------------------------------------------------------
@@ -408,7 +411,9 @@ def _run_cli(
 
     def pump() -> None:
         assert proc.stdout is not None
-        for chunk in iter(lambda: proc.stdout.read(4096), b""):
+        # read1, not read: read(4096) waits to fill the buffer, so a provider's short last lines
+        # stayed unread while a detached child still held the pipe, and were dropped at the end.
+        for chunk in iter(lambda: proc.stdout.read1(4096), b""):
             with log_lock:
                 if log_closed.is_set():
                     continue
@@ -584,7 +589,10 @@ def run_task(
 
     # One automatic retry on a different route when the failure is not about the task itself.
     if kind in ("quota-exhausted", "auth-required") and allow_fallback and route.fallback and fallback_from is None:
-        append_record(record)
+        with CancelTrap() as late:
+            append_record(record)
+        if late.received is not None:
+            return RunOutcome(record.exit, record.status, record, late_signal=late.received)
         print(
             f"agentplane: {route.provider} reported {kind}; retrying once via fallback role {route.fallback}",
             file=sys.stderr,
@@ -608,11 +616,18 @@ def run_task(
             fallback_from=f"{route.role or route.provider}/{kind}/{log_path}",
         )
 
-    try:
-        write_handoff(record, task, log_text, next_note)
-    except AgentplaneError as exc:
-        print(f"agentplane: {exc}", file=sys.stderr)
-        record.exit = 1
-        record.status = "handoff-write-failed"
-    append_record(record)
-    return RunOutcome(record.exit, record.status, record)
+    # The status is decided; a signal now must not kill the process between HANDOFF and ledger.
+    with CancelTrap() as late:
+        try:
+            write_handoff(record, task, log_text, next_note)
+        except AgentplaneError as exc:
+            print(f"agentplane: {exc}", file=sys.stderr)
+            record.exit = 1
+            record.status = "handoff-write-failed"
+        append_record(record)
+    if late.received is not None:
+        print(
+            f"agentplane: {signal.Signals(late.received).name} arrived after the run finished; the record is complete",
+            file=sys.stderr,
+        )
+    return RunOutcome(record.exit, record.status, record, late_signal=late.received)

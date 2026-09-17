@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-09-17
+
+### Upgrade notes
+
+- The forbidden-flag check is stricter (see Fixed). A provider table that passed `-f`, `-y`, `--force=…` or a `bypassPermissions` / `danger-full-access` value is now refused with exit 3, and `doctor` names it.
+- New exit codes 130 / 143 and status `cancelled`. Scripts that treated any non-zero exit as a provider failure keep working; scripts that match statuses should add `cancelled`.
+- The ledger gains `parent`; `command` holds `<task>` for argument-passing providers. Existing fields keep their meaning.
 
 ### Fixed
 
@@ -11,7 +17,10 @@
 - The forbidden-flag check matched exact strings only. It now also refuses `--dangerously-*=…`, `--force=…`, the short forms `-f` / `-y`, and the values `bypassPermissions`, `danger-full-access` and `yolo` as separate arguments or after `=` (covering `--permission-mode bypassPermissions`, `--sandbox=danger-full-access`, `-c sandbox_mode=danger-full-access`, `--approval-mode yolo`). Task text is no longer checked, so a task reading `--force` is not refused. `doctor` warns about such flags in any provider table.
 - The ledger no longer stores the full task for `task_via = "arg"` providers (cursor, gemini): `command` records `<task>` in its place, and `task_head` is masked like the HANDOFF. Ledger lines are appended with a single `os.write` on an `O_APPEND` descriptor.
 - State files were world-readable. The state directory, `logs/` and `evals/` are now created 0700, log files and `runs.jsonl` 0600, without touching the umask the provider inherits. `doctor` warns when an existing state directory or ledger is open to group/other and prints the `chmod` fix. Token shapes are masked in the log on disk after each run.
-- `eval report` now implements the documented rule: runs with status `quota-exhausted` or `auth-required` are excluded from pass rates and counted in a new `excluded (infrastructure)` column. `timeout` still counts as a failure, and `docs/evals.md` now says so.
+- `eval report` now implements the documented rule: runs with status `quota-exhausted`, `auth-required` or `cancelled` are excluded from pass rates and counted in a new `excluded` column. `timeout` still counts as a failure, and `docs/evals.md` now says so.
+- Ctrl-C during `eval run` stopped only the current trial and the suite went on, with the cancelled trial counted as a failure. A cancelled trial now stops the suite (exit 130 / 143) after its row and the report are written.
+- A provider's short final lines, including its `AGENTPLANE-STATUS` line, could be lost when a process it started detached and kept the output pipe open. Output is now logged as soon as it is readable.
+- A signal that arrived while the HANDOFF and ledger row were being written could kill agentplane between the two. Both are now written first.
 
 ### Security
 
@@ -20,6 +29,7 @@ Findings from a review of the changes above, fixed before release:
 - The git commands behind `changed`, `doctor` and `status` no longer run commands a provider planted in the repository (`core.fsmonitor`, filter drivers, the post-index-change hook), and they get the allowlisted environment instead of agentplane's own. A filter driver whose name cannot be overridden makes the snapshot refuse, with a note in `changed`.
 - File names in `changed` are quoted with git-style escapes when they contain control or format characters, quotes or backslashes, so a file name can no longer add sections to the HANDOFF. A trailing CR in a name is hashed correctly.
 - `changed` also lists newly set `skip-worktree` / `assume-unchanged` flags and changes to git's `config`, `info/exclude`, `info/attributes` and `hooks/*`.
+- With a nested `--out` (`--out dir/a/b/HANDOFF.md`), a provider that replaced `dir/a` with a symlink could make agentplane write the HANDOFF outside `--dir`. The output directory is now opened one component at a time from `--dir` without following symlinks (present since 0.1.0).
 - A failing or slow snapshot (for example a huge file) no longer loses the run: files above 8 MiB are fingerprinted by size and mtime, FIFOs and devices are never read, and any snapshot error becomes a note in `changed`.
 - A signal that arrives while output is still being collected cancels the run (no fallback). Processes the provider left holding its output are killed with its process group when the run is over, and later output is dropped instead of reaching the log unmasked.
 - The forbidden-flag check also splits at every `=` (`--config=sandbox_mode=danger-full-access`), ignores surrounding whitespace, refuses any flag or config key containing `dangerously` (`--allow-dangerously-skip-permissions`), and refuses `bypassPermissions` / `danger-full-access` anywhere in an element.

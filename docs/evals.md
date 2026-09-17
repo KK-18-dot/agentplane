@@ -53,7 +53,7 @@ agentplane eval report results/2026-09-13/results.jsonl
 agentplane eval report results/2026-09-13/results.jsonl --baseline results/2026-09-01/results.jsonl
 ```
 
-The report is a markdown table per case: route, pass count, pass rate, the number of runs excluded as infrastructure failures, and, with `--baseline`, the baseline rate and a **signed** difference so regressions and improvements surface together. Freeze a baseline whenever you change a role, a provider definition, or `PROJECT.md`, and compare against it before adopting the change.
+The report is a markdown table per case: route, pass count, pass rate, the number of excluded runs (quota, login or cancelled), and, with `--baseline`, the baseline rate and a **signed** difference so regressions and improvements surface together. Freeze a baseline whenever you change a role, a provider definition, or `PROJECT.md`, and compare against it before adopting the change.
 
 In CI, let the comparison decide:
 
@@ -67,7 +67,7 @@ agentplane eval report results/new/results.jsonl --baseline results/base/results
 
 - **Code graders first.** A check script that runs the project's own tests is worth more than any rubric. Add an LLM judge only for axes code cannot grade (write it as a `check.sh` that calls `agentplane run --role review --read-only` and parses the answer).
 - **One lever per suite.** Keep suites that measure behaviour (scope discipline, honesty about tests) separate from suites that measure capability, so a change in one does not blur the other.
-- **Exclude non-capability failures.** Runs with status `quota-exhausted` or `auth-required` say nothing about the route's capability, so `eval report` leaves them out of pass rates and lists them in the `excluded (infrastructure)` column and section. `timeout` is counted as a failure: a route that is too slow for the case did not deliver. Raise the case's `timeout` if the limit itself is wrong.
+- **Exclude non-capability failures.** Runs with status `quota-exhausted`, `auth-required` or `cancelled` say nothing about the route's capability, so `eval report` leaves them out of pass rates and lists them in the `excluded` column and section. A cancelled trial (Ctrl-C, SIGTERM) also stops `eval run`: the row is written, the report is rendered for what ran, and the command exits 130 / 143 without starting the next trial. `timeout` is counted as a failure: a route that is too slow for the case did not deliver. Raise the case's `timeout` if the limit itself is wrong.
 - **Trials.** Use `--trials 3` before calling a route "reliable" for a case.
 
 ## The bundled smoke suite

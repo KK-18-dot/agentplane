@@ -183,13 +183,34 @@ def status_for(code: int, self_reported: str, kind: str | None) -> tuple[str, st
     return ("failed", "Provider exited non-zero; read the full log.")
 
 
-def _safe_write(out: Path, text: str) -> None:
-    """Write mode 0600 into a directory we validated earlier, refusing symlink tricks."""
+def _open_dir_under(root: Path, parent: Path) -> int:
+    """Open ``parent`` one component at a time from ``root``, never following a symlink.
+
+    O_NOFOLLOW on the full path guards only its last component: a provider that replaced an
+    intermediate directory of a nested --out with a symlink could otherwise move the HANDOFF
+    outside --dir after the path was validated.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    rel = parent.relative_to(root)  # ValueError when outside
+    fd = os.open(str(root), flags)
+    try:
+        for part in rel.parts:
+            inner = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = inner
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _safe_write(out: Path, text: str, root: Path) -> None:
+    """Write mode 0600 inside ``root`` (the validated --dir), refusing symlink tricks."""
     parent = out.parent
     try:
-        dir_fd = os.open(str(parent), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0))
-    except OSError as exc:
-        raise AgentplaneError(f"cannot open output directory {parent}: {exc}") from exc
+        dir_fd = _open_dir_under(root, parent)
+    except (OSError, ValueError) as exc:
+        raise AgentplaneError(f"cannot open output directory {parent} inside {root}: {exc}") from exc
     try:
         try:
             os.unlink(out.name, dir_fd=dir_fd)
@@ -239,7 +260,7 @@ def write_handoff(record: RunRecord, task: str, log_text: str, next_note: str) -
 
 - {next_note}
 """
-    _safe_write(Path(record.out), body)
+    _safe_write(Path(record.out), body, Path(record.dir))
 
 
 def ledger_path() -> Path:

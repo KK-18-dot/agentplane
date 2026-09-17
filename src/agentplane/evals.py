@@ -13,8 +13,9 @@ A suite is a directory of cases. Each case directory contains:
 
 Every run appends one JSON line to results.jsonl; ``eval report`` renders a markdown table and,
 with ``--baseline``, signed pass-rate diffs so improvements and regressions surface together.
-Rows with an infrastructure status (quota-exhausted, auth-required) are excluded from pass rates
-and counted separately; ``--fail-on-regression`` turns a lower pass rate into exit 1 for CI.
+Rows whose status says nothing about the route's capability (quota-exhausted, auth-required,
+cancelled) are excluded from pass rates and counted separately; ``--fail-on-regression`` turns a
+lower pass rate into exit 1 for CI. A cancelled trial (Ctrl-C, SIGTERM) also stops the suite.
 """
 
 from __future__ import annotations
@@ -31,13 +32,13 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config, ensure_state_dir
-from .errors import UsageError
+from .errors import AgentplaneError, UsageError
 from .handoff import mask_secrets
 from .routing import resolve_route
 from .run import run_task
 
 CASE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-INFRA_STATUSES = ("quota-exhausted", "auth-required")
+EXCLUDED_STATUSES = ("quota-exhausted", "auth-required", "cancelled")
 
 
 @dataclass
@@ -162,8 +163,12 @@ def run_suite(
     results_dir.mkdir(parents=True, exist_ok=True)
     results_path = results_dir / "results.jsonl"
     results: list[CaseResult] = []
+    stopped: str | None = None  # set when a signal cancels a trial; no further trial starts
+    stop_code = 0
     with results_path.open("a", encoding="utf-8") as fh:
         for case_dir in cases:
+            if stopped:
+                break
             spec = _load_case(case_dir)
             case_role = role or spec.get("role")
             route = resolve_route(
@@ -175,6 +180,8 @@ def run_suite(
             )
             task = (case_dir / "task.md").read_text(encoding="utf-8")
             for trial in range(1, trials + 1):
+                if stopped:
+                    break
                 workdir = results_dir / case_dir.name / f"trial-{trial}"
                 _prepare_workdir(case_dir, workdir)
                 handoff = workdir / "HANDOFF.md"
@@ -209,8 +216,14 @@ def run_suite(
                 )
                 for reason in reasons:
                     print(f"     - {reason}")
+                if rec.status == "cancelled":
+                    stopped, stop_code = f"{case_dir.name} trial {trial}", rec.exit
+                elif outcome.late_signal is not None:
+                    stopped, stop_code = f"{case_dir.name} trial {trial}", 128 + outcome.late_signal
     report_path = results_dir / "report.md"
     report_path.write_text(render_report(results, None), encoding="utf-8")
+    if stopped:
+        raise AgentplaneError(f"eval stopped by a signal during {stopped}; results so far: {results_path}", stop_code)
     return results_path, results
 
 
@@ -224,9 +237,10 @@ def load_results(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def is_infrastructure(row: dict[str, Any]) -> bool:
-    """A quota or login failure says nothing about the route's capability on the case."""
-    return row.get("status") in INFRA_STATUSES
+def is_excluded(row: dict[str, Any]) -> bool:
+    """A quota or login failure, or a run someone cancelled, says nothing about the route's
+    capability on the case."""
+    return row.get("status") in EXCLUDED_STATUSES
 
 
 def _pass_rates(rows: list[dict[str, Any]]) -> dict[str, tuple[int, int, int]]:
@@ -235,7 +249,7 @@ def _pass_rates(rows: list[dict[str, Any]]) -> dict[str, tuple[int, int, int]]:
     rates: dict[str, tuple[int, int, int]] = {}
     for row in rows:
         passed, counted, excluded = rates.get(row["case"], (0, 0, 0))
-        if is_infrastructure(row):
+        if is_excluded(row):
             rates[row["case"]] = (passed, counted, excluded + 1)
         else:
             rates[row["case"]] = (passed + (1 if row["passed"] else 0), counted + 1, excluded)
@@ -247,7 +261,7 @@ def _pct(passed: int, counted: int) -> str:
 
 
 def regressions(rows: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> list[str]:
-    """Cases present in both runs whose pass rate went down (infrastructure rows excluded)."""
+    """Cases present in both runs whose pass rate went down (excluded rows not counted)."""
     rates, base_rates = _pass_rates(rows), _pass_rates(baseline)
     found = []
     for case in sorted(set(rates) & set(base_rates)):
@@ -267,9 +281,9 @@ def uncompared(rows: list[dict[str, Any]], baseline: list[dict[str, Any]]) -> li
     notes = [f"{case} (only in the baseline)" for case in sorted(set(base_rates) - set(rates))]
     for case in sorted(set(rates) & set(base_rates)):
         if not rates[case][1]:
-            notes.append(f"{case} (every run excluded as infrastructure)")
+            notes.append(f"{case} (every run excluded: quota, login or cancelled)")
         elif not base_rates[case][1]:
-            notes.append(f"{case} (every baseline run excluded as infrastructure)")
+            notes.append(f"{case} (every baseline run excluded: quota, login or cancelled)")
     return notes
 
 
@@ -281,7 +295,7 @@ def render_report(results: list[CaseResult] | list[dict[str, Any]], baseline: li
     if rows:
         lines.append(f"suite: {rows[0]['suite']}  runs: {len(rows)}  cases: {len(rates)}")
         lines.append("")
-    header = "| case | route | pass | rate | excluded (infrastructure) |" + (" baseline | diff |" if baseline else "")
+    header = "| case | route | pass | rate | excluded |" + (" baseline | diff |" if baseline else "")
     lines.append(header)
     lines.append("|---|---|---|---|---|" + ("---|---|" if baseline else ""))
     total_pass = total_runs = total_excluded = 0
@@ -307,10 +321,10 @@ def render_report(results: list[CaseResult] | list[dict[str, Any]], baseline: li
     if total_runs or total_excluded:
         lines.append("")
         overall = f"overall: {total_pass}/{total_runs} ({_pct(total_pass, total_runs)})"
-        lines.append(overall + (f"; excluded (infrastructure): {total_excluded}" if total_excluded else ""))
+        lines.append(overall + (f"; excluded (quota, login or cancelled): {total_excluded}" if total_excluded else ""))
     for title, selected in (
-        ("failures", [r for r in rows if not r["passed"] and not is_infrastructure(r)]),
-        ("excluded (infrastructure)", [r for r in rows if is_infrastructure(r)]),
+        ("failures", [r for r in rows if not r["passed"] and not is_excluded(r)]),
+        ("excluded (quota, login or cancelled)", [r for r in rows if is_excluded(r)]),
     ):
         if selected:
             lines.extend(["", f"## {title}", ""])
